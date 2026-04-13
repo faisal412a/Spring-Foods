@@ -1,0 +1,838 @@
+import { Pool } from "pg";
+import {
+  AuditLogRecord,
+  DashboardData,
+  SessionUser,
+  companyName,
+  defaultUsers,
+  seedCustomers,
+  seedProductionTransactions,
+  seedProducts,
+  seedPurchaseOrders,
+  seedSalesOrders,
+  seedStockMovements,
+  seedSuppliers
+} from "./erp-data";
+import { createPasswordHash } from "./security";
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __erpPool: Pool | undefined;
+  // eslint-disable-next-line no-var
+  var __erpInitPromise: Promise<void> | undefined;
+}
+
+function getDatabaseUrl() {
+  return process.env.DATABASE_URL || "";
+}
+
+export function hasDatabase() {
+  return Boolean(getDatabaseUrl());
+}
+
+function assertDatabaseConfigured() {
+  if (!hasDatabase()) {
+    throw new Error("DATABASE_URL is not configured. Add Railway Postgres before creating live records.");
+  }
+}
+
+function getPool() {
+  if (!global.__erpPool) {
+    global.__erpPool = new Pool({
+      connectionString: getDatabaseUrl(),
+      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined
+    });
+  }
+
+  return global.__erpPool;
+}
+
+async function recordAudit(pool: Pool, userId: number | null, actionType: string, entityType: string, entityLabel: string, details: string) {
+  await pool.query(
+    `INSERT INTO audit_logs (user_id, action_type, entity_type, entity_label, details)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [userId, actionType, entityType, entityLabel, details]
+  );
+}
+
+async function seedDatabase(pool: Pool) {
+  const existingUsers = await pool.query("SELECT COUNT(*)::int AS count FROM users");
+  if (existingUsers.rows[0].count > 0) {
+    return;
+  }
+
+  for (const user of defaultUsers) {
+    await pool.query(
+      `INSERT INTO users (username, display_name, role, password_hash)
+       VALUES ($1, $2, $3, $4)`,
+      [user.username, user.displayName, user.role, createPasswordHash(user.password)]
+    );
+  }
+
+  for (const product of seedProducts) {
+    await pool.query(
+      `INSERT INTO products (code, name, category, unit_price, storage, shelf_life_days, reorder_level_cases)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [product.code, product.name, product.category, product.unitPrice, product.storage, product.shelfLifeDays, product.reorderLevelCases]
+    );
+  }
+
+  for (const customer of seedCustomers) {
+    await pool.query(
+      `INSERT INTO customers (name, segment, city, email, phone, receivable)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [customer.name, customer.segment, customer.city, customer.email, customer.phone, customer.receivable]
+    );
+  }
+
+  for (const supplier of seedSuppliers) {
+    await pool.query(
+      `INSERT INTO suppliers (name, material, rating, lead_time_days, status, email, phone)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [supplier.name, supplier.material, supplier.rating, supplier.leadTimeDays, supplier.status, supplier.email, supplier.phone]
+    );
+  }
+
+  const users = await pool.query("SELECT id, username FROM users");
+  const adminId = users.rows.find((row) => row.username === "admin")?.id ?? null;
+  const products = await pool.query("SELECT id, code, name, unit_price FROM products");
+  const customers = await pool.query("SELECT id, name, city FROM customers");
+  const suppliers = await pool.query("SELECT id, name, material FROM suppliers");
+
+  for (const movement of seedStockMovements) {
+    const product = products.rows.find((row) => row.code === movement.productCode);
+    if (!product) {
+      continue;
+    }
+
+    await pool.query(
+      `INSERT INTO stock_movements
+        (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [product.id, movement.movementType, movement.quantityCases, movement.zone, movement.batchCode, movement.expiryDate, movement.referenceType, movement.referenceId, movement.notes, adminId]
+    );
+  }
+
+  for (const order of seedSalesOrders) {
+    const customer = customers.rows.find((row) => row.name === order.customer);
+    const product = products.rows.find((row) => row.name === order.productName);
+    if (!customer || !product) {
+      continue;
+    }
+
+    const created = await pool.query(
+      `INSERT INTO sales_orders (order_no, customer_id, city, status, amount, delivery_date, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [order.orderNo, customer.id, order.city, order.status, order.amount, order.deliveryDate, adminId]
+    );
+
+    await pool.query(
+      `INSERT INTO sales_order_items (sales_order_id, product_id, quantity_cases, unit_price)
+       VALUES ($1, $2, $3, $4)`,
+      [created.rows[0].id, product.id, order.quantityCases, order.unitPrice]
+    );
+
+    await pool.query(
+      `INSERT INTO stock_movements
+        (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
+       VALUES ($1, 'OUT', $2, 'Dispatch Bay', $3, $4, 'sales-order', $5, $6, $7)`,
+      [product.id, order.quantityCases, `${order.orderNo}-ALLOC`, order.deliveryDate, order.orderNo, `Allocated to ${order.customer}`, adminId]
+    );
+  }
+
+  for (const po of seedPurchaseOrders) {
+    const supplier = suppliers.rows.find((row) => row.name === po.supplier);
+    if (!supplier) {
+      continue;
+    }
+
+    await pool.query(
+      `INSERT INTO purchase_orders (po_no, supplier_id, material, status, expected_date, quantity_cases, cost, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [po.poNo, supplier.id, po.material, po.status, po.expectedDate, po.quantityCases, po.cost, adminId]
+    );
+  }
+
+  for (const production of seedProductionTransactions) {
+    const product = products.rows.find((row) => row.name === production.productName);
+    if (!product) {
+      continue;
+    }
+
+    await pool.query(
+      `INSERT INTO production_transactions
+        (batch_no, product_id, line, status, planned_cases, produced_cases, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [production.batchNo, product.id, production.line, production.status, production.plannedCases, production.producedCases, adminId]
+    );
+  }
+
+  await recordAudit(pool, adminId, "seed", "system", "Initial Data", "Seeded starter data for products, customers, suppliers, orders, purchasing and production.");
+}
+
+export async function ensureDatabase() {
+  if (!hasDatabase()) {
+    return;
+  }
+
+  if (!global.__erpInitPromise) {
+    global.__erpInitPromise = (async () => {
+      const pool = getPool();
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id SERIAL PRIMARY KEY,
+          username TEXT UNIQUE NOT NULL,
+          display_name TEXT NOT NULL,
+          role TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS products (
+          id SERIAL PRIMARY KEY,
+          code TEXT UNIQUE NOT NULL,
+          name TEXT NOT NULL,
+          category TEXT NOT NULL,
+          unit_price NUMERIC(12, 2) NOT NULL,
+          storage TEXT NOT NULL,
+          shelf_life_days INTEGER NOT NULL,
+          reorder_level_cases INTEGER NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS customers (
+          id SERIAL PRIMARY KEY,
+          name TEXT UNIQUE NOT NULL,
+          segment TEXT NOT NULL,
+          city TEXT NOT NULL,
+          email TEXT NOT NULL DEFAULT '',
+          phone TEXT NOT NULL DEFAULT '',
+          receivable NUMERIC(12, 2) NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS suppliers (
+          id SERIAL PRIMARY KEY,
+          name TEXT UNIQUE NOT NULL,
+          material TEXT NOT NULL,
+          rating NUMERIC(4, 2) NOT NULL DEFAULT 0,
+          lead_time_days INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL,
+          email TEXT NOT NULL DEFAULT '',
+          phone TEXT NOT NULL DEFAULT '',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS sales_orders (
+          id SERIAL PRIMARY KEY,
+          order_no TEXT UNIQUE NOT NULL,
+          customer_id INTEGER NOT NULL REFERENCES customers(id),
+          city TEXT NOT NULL,
+          status TEXT NOT NULL,
+          amount NUMERIC(12, 2) NOT NULL,
+          delivery_date DATE NOT NULL,
+          created_by INTEGER REFERENCES users(id),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS sales_order_items (
+          id SERIAL PRIMARY KEY,
+          sales_order_id INTEGER NOT NULL REFERENCES sales_orders(id) ON DELETE CASCADE,
+          product_id INTEGER NOT NULL REFERENCES products(id),
+          quantity_cases INTEGER NOT NULL,
+          unit_price NUMERIC(12, 2) NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+          id SERIAL PRIMARY KEY,
+          po_no TEXT UNIQUE NOT NULL,
+          supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+          material TEXT NOT NULL,
+          status TEXT NOT NULL,
+          expected_date DATE NOT NULL,
+          quantity_cases INTEGER NOT NULL,
+          cost NUMERIC(12, 2) NOT NULL,
+          created_by INTEGER REFERENCES users(id),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS production_transactions (
+          id SERIAL PRIMARY KEY,
+          batch_no TEXT UNIQUE NOT NULL,
+          product_id INTEGER NOT NULL REFERENCES products(id),
+          line TEXT NOT NULL,
+          status TEXT NOT NULL,
+          planned_cases INTEGER NOT NULL,
+          produced_cases INTEGER NOT NULL,
+          created_by INTEGER REFERENCES users(id),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS stock_movements (
+          id SERIAL PRIMARY KEY,
+          product_id INTEGER NOT NULL REFERENCES products(id),
+          movement_type TEXT NOT NULL,
+          quantity_cases INTEGER NOT NULL,
+          zone TEXT NOT NULL,
+          batch_code TEXT NOT NULL,
+          expiry_date DATE,
+          reference_type TEXT NOT NULL,
+          reference_id TEXT NOT NULL,
+          notes TEXT NOT NULL DEFAULT '',
+          created_by INTEGER REFERENCES users(id),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id SERIAL PRIMARY KEY,
+          user_id INTEGER REFERENCES users(id),
+          action_type TEXT NOT NULL,
+          entity_type TEXT NOT NULL,
+          entity_label TEXT NOT NULL,
+          details TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+
+      await seedDatabase(pool);
+    })();
+  }
+
+  await global.__erpInitPromise;
+}
+
+type RawUserRow = {
+  id: number;
+  username: string;
+  display_name: string;
+  role: SessionUser["role"];
+};
+
+function mapUser(row: RawUserRow): SessionUser {
+  return { id: row.id, username: row.username, displayName: row.display_name, role: row.role };
+}
+
+export async function findUserByUsername(username: string) {
+  if (!hasDatabase()) {
+    return null;
+  }
+
+  await ensureDatabase();
+  const result = await getPool().query(
+    "SELECT id, username, display_name, role, password_hash FROM users WHERE username = $1 LIMIT 1",
+    [username]
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function getUserById(id: number) {
+  if (!hasDatabase()) {
+    return null;
+  }
+
+  await ensureDatabase();
+  const result = await getPool().query("SELECT id, username, display_name, role FROM users WHERE id = $1 LIMIT 1", [id]);
+  return result.rows[0] ? mapUser(result.rows[0]) : null;
+}
+
+export async function updateUserPassword(userId: number, password: string) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query("UPDATE users SET password_hash = $1 WHERE id = $2", [createPasswordHash(password), userId]);
+  await recordAudit(pool, userId, "password-change", "user", `User ${userId}`, "Password updated.");
+}
+
+export async function getDashboardData(currentUser: SessionUser | null): Promise<DashboardData> {
+  if (!hasDatabase()) {
+    return getDemoDashboardData(currentUser);
+  }
+
+  await ensureDatabase();
+  const pool = getPool();
+
+  const [users, products, customers, suppliers, salesOrders, purchaseOrders, productionTransactions, stockMovements, inventory, auditLogs] =
+    await Promise.all([
+      pool.query("SELECT id, username, display_name, role FROM users ORDER BY id"),
+      pool.query("SELECT id, code, name, category, unit_price, storage, shelf_life_days, reorder_level_cases FROM products ORDER BY name"),
+      pool.query("SELECT id, name, segment, city, email, phone, receivable FROM customers ORDER BY name"),
+      pool.query("SELECT id, name, material, rating, lead_time_days, status, email, phone FROM suppliers ORDER BY name"),
+      pool.query(
+        `SELECT so.id, so.order_no, so.customer_id, c.name AS customer, so.city, so.status, so.amount, so.delivery_date,
+                soi.product_id, p.name AS product_name, soi.quantity_cases, soi.unit_price, so.created_at
+         FROM sales_orders so
+         JOIN customers c ON c.id = so.customer_id
+         JOIN sales_order_items soi ON soi.sales_order_id = so.id
+         JOIN products p ON p.id = soi.product_id
+         ORDER BY so.created_at DESC`
+      ),
+      pool.query(
+        `SELECT po.id, po.po_no, po.supplier_id, s.name AS supplier, po.material, po.status, po.expected_date, po.quantity_cases, po.cost, po.created_at
+         FROM purchase_orders po
+         JOIN suppliers s ON s.id = po.supplier_id
+         ORDER BY po.created_at DESC`
+      ),
+      pool.query(
+        `SELECT pt.id, pt.batch_no, pt.product_id, p.name AS product_name, pt.line, pt.status, pt.planned_cases, pt.produced_cases, pt.created_at
+         FROM production_transactions pt
+         JOIN products p ON p.id = pt.product_id
+         ORDER BY pt.created_at DESC`
+      ),
+      pool.query(
+        `SELECT sm.id, sm.product_id, p.name AS product_name, sm.movement_type, sm.quantity_cases, sm.zone, sm.batch_code, sm.expiry_date, sm.reference_type, sm.reference_id, sm.notes, sm.created_at
+         FROM stock_movements sm
+         JOIN products p ON p.id = sm.product_id
+         ORDER BY sm.created_at DESC
+         LIMIT 30`
+      ),
+      pool.query(
+        `SELECT p.id AS product_id, p.code, p.name AS product_name, p.category, p.storage, p.reorder_level_cases,
+                COALESCE(SUM(CASE WHEN sm.movement_type = 'OUT' THEN -sm.quantity_cases ELSE sm.quantity_cases END), 0) AS on_hand_cases,
+                COALESCE(MAX(sm.zone), '') AS latest_zone, COALESCE(MAX(sm.batch_code), '') AS latest_batch,
+                COALESCE(MAX(sm.expiry_date)::text, '') AS latest_expiry_date
+         FROM products p
+         LEFT JOIN stock_movements sm ON sm.product_id = p.id
+         GROUP BY p.id, p.code, p.name, p.category, p.storage, p.reorder_level_cases
+         ORDER BY p.name`
+      ),
+      pool.query(
+        `SELECT al.id, COALESCE(u.display_name, 'System') AS actor_name, COALESCE(u.role, 'system') AS actor_role,
+                al.action_type, al.entity_type, al.entity_label, al.details, al.created_at
+         FROM audit_logs al
+         LEFT JOIN users u ON u.id = al.user_id
+         ORDER BY al.created_at DESC
+         LIMIT 25`
+      )
+    ]);
+
+  const salesOrderRows = salesOrders.rows.map((row) => ({
+    id: row.id,
+    orderNo: row.order_no,
+    customerId: row.customer_id,
+    customer: row.customer,
+    city: row.city,
+    status: row.status,
+    amount: Number(row.amount),
+    deliveryDate: String(row.delivery_date).slice(0, 10),
+    productId: row.product_id,
+    productName: row.product_name,
+    quantityCases: row.quantity_cases,
+    unitPrice: Number(row.unit_price),
+    createdAt: row.created_at.toISOString()
+  }));
+
+  const purchaseOrderRows = purchaseOrders.rows.map((row) => ({
+    id: row.id,
+    poNo: row.po_no,
+    supplierId: row.supplier_id,
+    supplier: row.supplier,
+    material: row.material,
+    status: row.status,
+    expectedDate: String(row.expected_date).slice(0, 10),
+    quantityCases: row.quantity_cases,
+    cost: Number(row.cost),
+    createdAt: row.created_at.toISOString()
+  }));
+
+  const productionRows = productionTransactions.rows.map((row) => ({
+    id: row.id,
+    batchNo: row.batch_no,
+    productId: row.product_id,
+    productName: row.product_name,
+    line: row.line,
+    status: row.status,
+    plannedCases: row.planned_cases,
+    producedCases: row.produced_cases,
+    createdAt: row.created_at.toISOString()
+  }));
+
+  const stockRows = stockMovements.rows.map((row) => ({
+    id: row.id,
+    productId: row.product_id,
+    productName: row.product_name,
+    movementType: row.movement_type,
+    quantityCases: row.quantity_cases,
+    zone: row.zone,
+    batchCode: row.batch_code,
+    expiryDate: row.expiry_date ? String(row.expiry_date).slice(0, 10) : "",
+    referenceType: row.reference_type,
+    referenceId: row.reference_id,
+    notes: row.notes,
+    createdAt: row.created_at.toISOString()
+  }));
+
+  const inventoryRows = inventory.rows.map((row) => ({
+    productId: row.product_id,
+    code: row.code,
+    productName: row.product_name,
+    category: row.category,
+    storage: row.storage,
+    onHandCases: Number(row.on_hand_cases),
+    reorderLevelCases: row.reorder_level_cases,
+    latestZone: row.latest_zone,
+    latestBatch: row.latest_batch,
+    latestExpiryDate: row.latest_expiry_date
+  }));
+
+  const auditRows: AuditLogRecord[] = auditLogs.rows.map((row) => ({
+    id: row.id,
+    actorName: row.actor_name,
+    actorRole: row.actor_role,
+    actionType: row.action_type,
+    entityType: row.entity_type,
+    entityLabel: row.entity_label,
+    details: row.details,
+    createdAt: row.created_at.toISOString()
+  }));
+
+  const revenue = salesOrderRows.reduce((sum, item) => sum + item.amount, 0);
+  const payable = purchaseOrderRows.reduce((sum, item) => sum + item.cost, 0);
+  const receivable = customers.rows.reduce((sum, row) => sum + Number(row.receivable), 0);
+  const lowStock = inventoryRows.filter((item) => item.onHandCases <= item.reorderLevelCases).length;
+
+  return {
+    company: companyName,
+    mode: "database",
+    databaseReady: true,
+    currentUser,
+    users: users.rows.map(mapUser),
+    products: products.rows.map((row) => ({ id: row.id, code: row.code, name: row.name, category: row.category, unitPrice: Number(row.unit_price), storage: row.storage, shelfLifeDays: row.shelf_life_days, reorderLevelCases: row.reorder_level_cases })),
+    customers: customers.rows.map((row) => ({ id: row.id, name: row.name, segment: row.segment, city: row.city, email: row.email, phone: row.phone, receivable: Number(row.receivable) })),
+    suppliers: suppliers.rows.map((row) => ({ id: row.id, name: row.name, material: row.material, rating: Number(row.rating), leadTimeDays: row.lead_time_days, status: row.status, email: row.email, phone: row.phone })),
+    salesOrders: salesOrderRows,
+    purchaseOrders: purchaseOrderRows,
+    productionTransactions: productionRows,
+    stockMovements: stockRows,
+    auditLogs: auditRows,
+    inventory: inventoryRows,
+    kpis: [
+      { label: "Inventory Value", value: inventoryRows.reduce((sum, row) => sum + row.onHandCases, 0).toLocaleString(), note: "Cases currently in stock", tone: "warning" },
+      { label: "Revenue", value: revenue.toLocaleString(), note: "Sales order total", tone: "success" },
+      { label: "Receivables", value: receivable.toLocaleString(), note: "Open customer balances", tone: "neutral" },
+      { label: "Payables", value: payable.toLocaleString(), note: "Outstanding supplier value", tone: "danger" }
+    ],
+    alerts: [
+      `${lowStock} items are below minimum stock level.`,
+      `${salesOrderRows.filter((row) => row.status !== "Delivered").length} sales orders are still active.`,
+      `${purchaseOrderRows.filter((row) => row.status !== "Received").length} purchase orders are pending receipt.`
+    ]
+  };
+}
+
+function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
+  const salesOrders = seedSalesOrders.map((order, index) => ({
+    id: index + 1,
+    customerId: index + 1,
+    productId: index + 1,
+    ...order,
+    createdAt: new Date().toISOString()
+  }));
+
+  const purchaseOrders = seedPurchaseOrders.map((row, index) => ({
+    id: index + 1,
+    supplierId: index + 1,
+    ...row,
+    createdAt: new Date().toISOString()
+  }));
+
+  const productionTransactions = seedProductionTransactions.map((row, index) => ({
+    id: index + 1,
+    productId: index + 1,
+    ...row,
+    createdAt: new Date().toISOString()
+  }));
+
+  const inventory = seedProducts.map((product, index) => ({
+    productId: index + 1,
+    code: product.code,
+    productName: product.name,
+    category: product.category,
+    storage: product.storage,
+    onHandCases: seedStockMovements[index]?.quantityCases ?? 0,
+    reorderLevelCases: product.reorderLevelCases,
+    latestZone: seedStockMovements[index]?.zone ?? "",
+    latestBatch: seedStockMovements[index]?.batchCode ?? "",
+    latestExpiryDate: seedStockMovements[index]?.expiryDate ?? ""
+  }));
+
+  return {
+    company: companyName,
+    mode: "demo",
+    databaseReady: false,
+    currentUser,
+    users: defaultUsers.map((user, index) => ({ id: index + 1, username: user.username, displayName: user.displayName, role: user.role })),
+    products: seedProducts.map((row, index) => ({ id: index + 1, ...row })),
+    customers: seedCustomers.map((row, index) => ({ id: index + 1, ...row })),
+    suppliers: seedSuppliers.map((row, index) => ({ id: index + 1, ...row })),
+    salesOrders,
+    purchaseOrders,
+    productionTransactions,
+    stockMovements: seedStockMovements.map((row, index) => ({
+      id: index + 1,
+      productId: index + 1,
+      productName: seedProducts[index]?.name ?? row.productCode,
+      movementType: row.movementType,
+      quantityCases: row.quantityCases,
+      zone: row.zone,
+      batchCode: row.batchCode,
+      expiryDate: row.expiryDate,
+      referenceType: row.referenceType,
+      referenceId: row.referenceId,
+      notes: row.notes,
+      createdAt: new Date().toISOString()
+    })),
+    auditLogs: [
+      { id: 1, actorName: "System", actorRole: "system", actionType: "demo-mode", entityType: "system", entityLabel: "Database", details: "Connect Railway Postgres to enable edits, deletes, password changes and audit persistence.", createdAt: new Date().toISOString() }
+    ],
+    inventory,
+    kpis: [
+      { label: "Inventory Value", value: "1,657", note: "Cases currently in stock", tone: "warning" },
+      { label: "Revenue", value: "38,900", note: "Demo sales order total", tone: "success" },
+      { label: "Receivables", value: "55,200", note: "Open customer balances", tone: "neutral" },
+      { label: "Payables", value: "24,900", note: "Outstanding supplier value", tone: "danger" }
+    ],
+    alerts: ["3 items are below minimum stock level.", "2 purchase orders are pending receipt.", "Connect Railway Postgres to enable full editing, deletes and password changes."]
+  };
+}
+
+export async function createProduct(input: { code: string; name: string; category: string; unitPrice: number; storage: string; shelfLifeDays: number; reorderLevelCases: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO products (code, name, category, unit_price, storage, shelf_life_days, reorder_level_cases)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [input.code, input.name, input.category, input.unitPrice, input.storage, input.shelfLifeDays, input.reorderLevelCases]
+  );
+  await recordAudit(pool, input.userId, "create", "product", input.name, `Created product ${input.code}.`);
+}
+
+export async function updateProduct(input: { id: number; code: string; name: string; category: string; unitPrice: number; storage: string; shelfLifeDays: number; reorderLevelCases: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `UPDATE products SET code = $2, name = $3, category = $4, unit_price = $5, storage = $6, shelf_life_days = $7, reorder_level_cases = $8 WHERE id = $1`,
+    [input.id, input.code, input.name, input.category, input.unitPrice, input.storage, input.shelfLifeDays, input.reorderLevelCases]
+  );
+  await recordAudit(pool, input.userId, "update", "product", input.name, "Updated product master data.");
+}
+
+export async function deleteProduct(id: number, userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const label = await pool.query("SELECT name FROM products WHERE id = $1", [id]);
+  await pool.query("DELETE FROM sales_order_items WHERE product_id = $1", [id]);
+  await pool.query("DELETE FROM production_transactions WHERE product_id = $1", [id]);
+  await pool.query("DELETE FROM stock_movements WHERE product_id = $1", [id]);
+  await pool.query("DELETE FROM products WHERE id = $1", [id]);
+  await recordAudit(pool, userId, "delete", "product", label.rows[0]?.name ?? `Product ${id}`, "Deleted product and related stock references.");
+}
+
+export async function createCustomer(input: { name: string; segment: string; city: string; email: string; phone: string; receivable: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO customers (name, segment, city, email, phone, receivable) VALUES ($1, $2, $3, $4, $5, $6)`,
+    [input.name, input.segment, input.city, input.email, input.phone, input.receivable]
+  );
+  await recordAudit(pool, input.userId, "create", "customer", input.name, "Created customer.");
+}
+
+export async function updateCustomer(input: { id: number; name: string; segment: string; city: string; email: string; phone: string; receivable: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `UPDATE customers SET name = $2, segment = $3, city = $4, email = $5, phone = $6, receivable = $7 WHERE id = $1`,
+    [input.id, input.name, input.segment, input.city, input.email, input.phone, input.receivable]
+  );
+  await recordAudit(pool, input.userId, "update", "customer", input.name, "Updated customer.");
+}
+
+export async function deleteCustomer(id: number, userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const label = await pool.query("SELECT name FROM customers WHERE id = $1", [id]);
+  await pool.query("DELETE FROM sales_order_items WHERE sales_order_id IN (SELECT id FROM sales_orders WHERE customer_id = $1)", [id]);
+  await pool.query("DELETE FROM sales_orders WHERE customer_id = $1", [id]);
+  await pool.query("DELETE FROM customers WHERE id = $1", [id]);
+  await recordAudit(pool, userId, "delete", "customer", label.rows[0]?.name ?? `Customer ${id}`, "Deleted customer and related sales orders.");
+}
+
+export async function createSupplier(input: { name: string; material: string; rating: number; leadTimeDays: number; status: string; email: string; phone: string; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO suppliers (name, material, rating, lead_time_days, status, email, phone) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [input.name, input.material, input.rating, input.leadTimeDays, input.status, input.email, input.phone]
+  );
+  await recordAudit(pool, input.userId, "create", "supplier", input.name, "Created supplier.");
+}
+
+export async function updateSupplier(input: { id: number; name: string; material: string; rating: number; leadTimeDays: number; status: string; email: string; phone: string; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `UPDATE suppliers SET name = $2, material = $3, rating = $4, lead_time_days = $5, status = $6, email = $7, phone = $8 WHERE id = $1`,
+    [input.id, input.name, input.material, input.rating, input.leadTimeDays, input.status, input.email, input.phone]
+  );
+  await recordAudit(pool, input.userId, "update", "supplier", input.name, "Updated supplier.");
+}
+
+export async function deleteSupplier(id: number, userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const label = await pool.query("SELECT name FROM suppliers WHERE id = $1", [id]);
+  await pool.query("DELETE FROM purchase_orders WHERE supplier_id = $1", [id]);
+  await pool.query("DELETE FROM suppliers WHERE id = $1", [id]);
+  await recordAudit(pool, userId, "delete", "supplier", label.rows[0]?.name ?? `Supplier ${id}`, "Deleted supplier and related purchase orders.");
+}
+
+export async function createSalesOrder(input: { orderNo: string; customerId: number; productId: number; quantityCases: number; unitPrice: number; status: string; deliveryDate: string; zone: string; batchCode: string; expiryDate: string; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const customer = await pool.query("SELECT city, name FROM customers WHERE id = $1", [input.customerId]);
+  const amount = input.quantityCases * input.unitPrice;
+  const order = await pool.query(
+    `INSERT INTO sales_orders (order_no, customer_id, city, status, amount, delivery_date, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [input.orderNo, input.customerId, customer.rows[0]?.city ?? "", input.status, amount, input.deliveryDate, input.userId]
+  );
+  await pool.query(
+    `INSERT INTO sales_order_items (sales_order_id, product_id, quantity_cases, unit_price) VALUES ($1, $2, $3, $4)`,
+    [order.rows[0].id, input.productId, input.quantityCases, input.unitPrice]
+  );
+  await pool.query(
+    `INSERT INTO stock_movements (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
+     VALUES ($1, 'OUT', $2, $3, $4, $5, 'sales-order', $6, $7, $8)`,
+    [input.productId, input.quantityCases, input.zone, input.batchCode, input.expiryDate || null, input.orderNo, "Reserved and dispatched against sales order", input.userId]
+  );
+  await recordAudit(pool, input.userId, "create", "sales-order", input.orderNo, `Created sales order for ${customer.rows[0]?.name ?? "customer"}.`);
+}
+
+export async function updateSalesOrder(input: { id: number; orderNo: string; customerId: number; productId: number; quantityCases: number; unitPrice: number; status: string; deliveryDate: string; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const customer = await pool.query("SELECT city FROM customers WHERE id = $1", [input.customerId]);
+  const amount = input.quantityCases * input.unitPrice;
+  await pool.query(
+    `UPDATE sales_orders SET order_no = $2, customer_id = $3, city = $4, status = $5, amount = $6, delivery_date = $7 WHERE id = $1`,
+    [input.id, input.orderNo, input.customerId, customer.rows[0]?.city ?? "", input.status, amount, input.deliveryDate]
+  );
+  await pool.query(
+    `UPDATE sales_order_items SET product_id = $2, quantity_cases = $3, unit_price = $4 WHERE sales_order_id = $1`,
+    [input.id, input.productId, input.quantityCases, input.unitPrice]
+  );
+  await recordAudit(pool, input.userId, "update", "sales-order", input.orderNo, "Updated sales order.");
+}
+
+export async function deleteSalesOrder(id: number, userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const label = await pool.query("SELECT order_no FROM sales_orders WHERE id = $1", [id]);
+  await pool.query("DELETE FROM sales_order_items WHERE sales_order_id = $1", [id]);
+  await pool.query("DELETE FROM sales_orders WHERE id = $1", [id]);
+  await recordAudit(pool, userId, "delete", "sales-order", label.rows[0]?.order_no ?? `Order ${id}`, "Deleted sales order.");
+}
+
+export async function createPurchaseOrder(input: { poNo: string; supplierId: number; material: string; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO purchase_orders (po_no, supplier_id, material, status, expected_date, quantity_cases, cost, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [input.poNo, input.supplierId, input.material, input.status, input.expectedDate, input.quantityCases, input.cost, input.userId]
+  );
+  await recordAudit(pool, input.userId, "create", "purchase-order", input.poNo, "Created purchase order.");
+}
+
+export async function updatePurchaseOrder(input: { id: number; poNo: string; supplierId: number; material: string; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `UPDATE purchase_orders
+     SET po_no = $2, supplier_id = $3, material = $4, status = $5, expected_date = $6, quantity_cases = $7, cost = $8
+     WHERE id = $1`,
+    [input.id, input.poNo, input.supplierId, input.material, input.status, input.expectedDate, input.quantityCases, input.cost]
+  );
+  await recordAudit(pool, input.userId, "update", "purchase-order", input.poNo, "Updated purchase order.");
+}
+
+export async function deletePurchaseOrder(id: number, userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const label = await pool.query("SELECT po_no FROM purchase_orders WHERE id = $1", [id]);
+  await pool.query("DELETE FROM purchase_orders WHERE id = $1", [id]);
+  await recordAudit(pool, userId, "delete", "purchase-order", label.rows[0]?.po_no ?? `PO ${id}`, "Deleted purchase order.");
+}
+
+export async function createProductionTransaction(input: { batchNo: string; productId: number; line: string; status: string; plannedCases: number; producedCases: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const product = await pool.query("SELECT name FROM products WHERE id = $1", [input.productId]);
+  await pool.query(
+    `INSERT INTO production_transactions (batch_no, product_id, line, status, planned_cases, produced_cases, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [input.batchNo, input.productId, input.line, input.status, input.plannedCases, input.producedCases, input.userId]
+  );
+  if (input.producedCases > 0) {
+    await pool.query(
+      `INSERT INTO stock_movements (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
+       VALUES ($1, 'IN', $2, 'Finished Goods', $3, NULL, 'production', $4, $5, $6)`,
+      [input.productId, input.producedCases, input.batchNo, input.batchNo, "Finished production receipt", input.userId]
+    );
+  }
+  await recordAudit(pool, input.userId, "create", "production", input.batchNo, `Recorded production for ${product.rows[0]?.name ?? "product"}.`);
+}
+
+export async function updateProductionTransaction(input: { id: number; batchNo: string; productId: number; line: string; status: string; plannedCases: number; producedCases: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const product = await pool.query("SELECT name FROM products WHERE id = $1", [input.productId]);
+  await pool.query(
+    `UPDATE production_transactions
+     SET batch_no = $2, product_id = $3, line = $4, status = $5, planned_cases = $6, produced_cases = $7
+     WHERE id = $1`,
+    [input.id, input.batchNo, input.productId, input.line, input.status, input.plannedCases, input.producedCases]
+  );
+  await recordAudit(pool, input.userId, "update", "production", input.batchNo, `Updated production for ${product.rows[0]?.name ?? "product"}.`);
+}
+
+export async function deleteProductionTransaction(id: number, userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const label = await pool.query("SELECT batch_no FROM production_transactions WHERE id = $1", [id]);
+  await pool.query("DELETE FROM production_transactions WHERE id = $1", [id]);
+  await recordAudit(pool, userId, "delete", "production", label.rows[0]?.batch_no ?? `Batch ${id}`, "Deleted production transaction.");
+}
+
+export async function createStockMovement(input: { productId: number; movementType: "IN" | "OUT" | "ADJUSTMENT"; quantityCases: number; zone: string; batchCode: string; expiryDate: string; referenceType: string; referenceId: string; notes: string; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const product = await pool.query("SELECT name FROM products WHERE id = $1", [input.productId]);
+  await pool.query(
+    `INSERT INTO stock_movements (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [input.productId, input.movementType, input.quantityCases, input.zone, input.batchCode, input.expiryDate || null, input.referenceType, input.referenceId, input.notes, input.userId]
+  );
+  await recordAudit(pool, input.userId, "create", "stock-movement", input.referenceId, `${input.movementType} ${input.quantityCases} cases for ${product.rows[0]?.name ?? "product"}.`);
+}
