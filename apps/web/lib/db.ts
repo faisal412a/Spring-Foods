@@ -4,6 +4,7 @@ import {
   DashboardData,
   SessionUser,
   companyName,
+  defaultSystemSettings,
   defaultUsers,
   seedCustomers,
   seedProductionTransactions,
@@ -21,6 +22,8 @@ declare global {
   // eslint-disable-next-line no-var
   var __erpInitPromise: Promise<void> | undefined;
 }
+
+const DEFAULT_COUNTER_START = 101;
 
 function getDatabaseUrl() {
   return process.env.DATABASE_URL || "";
@@ -55,9 +58,63 @@ async function recordAudit(pool: Pool, userId: number | null, actionType: string
   );
 }
 
+async function initializeCounters(pool: Pool) {
+  const counters = [
+    ["sales_order", DEFAULT_COUNTER_START],
+    ["invoice", DEFAULT_COUNTER_START],
+    ["purchase_order", DEFAULT_COUNTER_START],
+    ["production_batch", DEFAULT_COUNTER_START]
+  ] as const;
+
+  for (const [name, nextValue] of counters) {
+    await pool.query(
+      `INSERT INTO document_counters (counter_name, next_value)
+       VALUES ($1, $2)
+       ON CONFLICT (counter_name) DO NOTHING`,
+      [name, nextValue]
+    );
+  }
+}
+
+async function ensureSystemSettings(pool: Pool) {
+  await pool.query(
+    `INSERT INTO system_settings
+      (id, region, locale, currency_code, logo_url, invoice_title, invoice_subtitle, purchase_order_title, purchase_order_subtitle, print_footer_note, accent_color)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      defaultSystemSettings.region,
+      defaultSystemSettings.locale,
+      defaultSystemSettings.currencyCode,
+      defaultSystemSettings.logoUrl,
+      defaultSystemSettings.invoiceTitle,
+      defaultSystemSettings.invoiceSubtitle,
+      defaultSystemSettings.purchaseOrderTitle,
+      defaultSystemSettings.purchaseOrderSubtitle,
+      defaultSystemSettings.printFooterNote,
+      defaultSystemSettings.accentColor
+    ]
+  );
+}
+
+async function getNextDocumentNumber(pool: Pool, counterName: string, prefix: string) {
+  const result = await pool.query(
+    `UPDATE document_counters
+     SET next_value = next_value + 1
+     WHERE counter_name = $1
+     RETURNING next_value - 1 AS issued_value`,
+    [counterName]
+  );
+
+  const issuedValue = Number(result.rows[0]?.issued_value ?? DEFAULT_COUNTER_START);
+  return `${prefix}${issuedValue}`;
+}
+
 async function seedDatabase(pool: Pool) {
   const existingUsers = await pool.query("SELECT COUNT(*)::int AS count FROM users");
   if (existingUsers.rows[0].count > 0) {
+    await ensureSystemSettings(pool);
+    await initializeCounters(pool);
     return;
   }
 
@@ -93,11 +150,14 @@ async function seedDatabase(pool: Pool) {
     );
   }
 
+  await ensureSystemSettings(pool);
+  await initializeCounters(pool);
+
   const users = await pool.query("SELECT id, username FROM users");
   const adminId = users.rows.find((row) => row.username === "admin")?.id ?? null;
   const products = await pool.query("SELECT id, code, name, unit_price FROM products");
   const customers = await pool.query("SELECT id, name, city FROM customers");
-  const suppliers = await pool.query("SELECT id, name, material FROM suppliers");
+  const suppliers = await pool.query("SELECT id, name FROM suppliers");
 
   for (const movement of seedStockMovements) {
     const product = products.rows.find((row) => row.code === movement.productCode);
@@ -120,11 +180,13 @@ async function seedDatabase(pool: Pool) {
       continue;
     }
 
+    const orderNo = await getNextDocumentNumber(pool, "sales_order", "SO-");
+    const invoiceNo = await getNextDocumentNumber(pool, "invoice", "INV-");
     const created = await pool.query(
-      `INSERT INTO sales_orders (order_no, customer_id, city, status, amount, delivery_date, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO sales_orders (order_no, invoice_no, customer_id, city, status, amount, delivery_date, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id`,
-      [order.orderNo, customer.id, order.city, order.status, order.amount, order.deliveryDate, adminId]
+      [orderNo, invoiceNo, customer.id, order.city, order.status, order.amount, order.deliveryDate, adminId]
     );
 
     await pool.query(
@@ -136,8 +198,8 @@ async function seedDatabase(pool: Pool) {
     await pool.query(
       `INSERT INTO stock_movements
         (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
-       VALUES ($1, 'OUT', $2, 'Dispatch Bay', $3, $4, 'sales-order', $5, $6, $7)`,
-      [product.id, order.quantityCases, `${order.orderNo}-ALLOC`, order.deliveryDate, order.orderNo, `Allocated to ${order.customer}`, adminId]
+       VALUES ($1, 'OUT', $2, 'Dispatch Bay', $3, $4, 'invoice', $5, $6, $7)`,
+      [product.id, order.quantityCases, `${orderNo}-ALLOC`, order.deliveryDate, invoiceNo, `Dispatched against ${invoiceNo}`, adminId]
     );
   }
 
@@ -166,6 +228,15 @@ async function seedDatabase(pool: Pool) {
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [production.batchNo, product.id, production.line, production.status, production.plannedCases, production.producedCases, adminId]
     );
+
+    if (production.producedCases > 0) {
+      await pool.query(
+        `INSERT INTO stock_movements
+          (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
+         VALUES ($1, 'IN', $2, 'Finished Goods', $3, NULL, 'production', $4, $5, $6)`,
+        [product.id, production.producedCases, production.batchNo, production.batchNo, "Finished production receipt", adminId]
+      );
+    }
   }
 
   await recordAudit(pool, adminId, "seed", "system", "Initial Data", "Seeded starter data for products, customers, suppliers, orders, purchasing and production.");
@@ -228,6 +299,7 @@ export async function ensureDatabase() {
         CREATE TABLE IF NOT EXISTS sales_orders (
           id SERIAL PRIMARY KEY,
           order_no TEXT UNIQUE NOT NULL,
+          invoice_no TEXT UNIQUE NOT NULL DEFAULT '',
           customer_id INTEGER NOT NULL REFERENCES customers(id),
           city TEXT NOT NULL,
           status TEXT NOT NULL,
@@ -294,7 +366,39 @@ export async function ensureDatabase() {
           details TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS document_counters (
+          counter_name TEXT PRIMARY KEY,
+          next_value INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS system_settings (
+          id INTEGER PRIMARY KEY,
+          region TEXT NOT NULL,
+          locale TEXT NOT NULL,
+          currency_code TEXT NOT NULL,
+          logo_url TEXT NOT NULL DEFAULT '',
+          invoice_title TEXT NOT NULL,
+          invoice_subtitle TEXT NOT NULL,
+          purchase_order_title TEXT NOT NULL,
+          purchase_order_subtitle TEXT NOT NULL,
+          print_footer_note TEXT NOT NULL,
+          accent_color TEXT NOT NULL
+        );
       `);
+
+      await pool.query(`ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS invoice_no TEXT NOT NULL DEFAULT ''`);
+      await initializeCounters(pool);
+      await ensureSystemSettings(pool);
+
+      const existingInvoices = await pool.query(
+        `SELECT id, order_no FROM sales_orders WHERE invoice_no = '' OR invoice_no IS NULL ORDER BY id`
+      );
+
+      for (const row of existingInvoices.rows) {
+        const invoiceNo = await getNextDocumentNumber(pool, "invoice", "INV-");
+        await pool.query("UPDATE sales_orders SET invoice_no = $2 WHERE id = $1", [row.id, invoiceNo]);
+      }
 
       await seedDatabase(pool);
     })();
@@ -312,6 +416,10 @@ type RawUserRow = {
 
 function mapUser(row: RawUserRow): SessionUser {
   return { id: row.id, username: row.username, displayName: row.display_name, role: row.role };
+}
+
+function toIsoDate(value: unknown) {
+  return value ? String(value).slice(0, 10) : "";
 }
 
 export async function findUserByUsername(username: string) {
@@ -345,6 +453,73 @@ export async function updateUserPassword(userId: number, password: string) {
   await recordAudit(pool, userId, "password-change", "user", `User ${userId}`, "Password updated.");
 }
 
+export async function getSystemSettings() {
+  if (!hasDatabase()) {
+    return defaultSystemSettings;
+  }
+
+  await ensureDatabase();
+  const pool = getPool();
+  const result = await pool.query("SELECT * FROM system_settings WHERE id = 1 LIMIT 1");
+  const row = result.rows[0];
+
+  if (!row) {
+    return defaultSystemSettings;
+  }
+
+  return {
+    region: row.region,
+    locale: row.locale,
+    currencyCode: row.currency_code,
+    logoUrl: row.logo_url,
+    invoiceTitle: row.invoice_title,
+    invoiceSubtitle: row.invoice_subtitle,
+    purchaseOrderTitle: row.purchase_order_title,
+    purchaseOrderSubtitle: row.purchase_order_subtitle,
+    printFooterNote: row.print_footer_note,
+    accentColor: row.accent_color
+  };
+}
+
+export async function updateSystemSettings(input: {
+  region: string;
+  locale: string;
+  currencyCode: string;
+  logoUrl: string;
+  invoiceTitle: string;
+  invoiceSubtitle: string;
+  purchaseOrderTitle: string;
+  purchaseOrderSubtitle: string;
+  printFooterNote: string;
+  accentColor: string;
+  userId: number | null;
+}) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+
+  await pool.query(
+    `UPDATE system_settings
+     SET region = $1, locale = $2, currency_code = $3, logo_url = $4, invoice_title = $5, invoice_subtitle = $6,
+         purchase_order_title = $7, purchase_order_subtitle = $8, print_footer_note = $9, accent_color = $10
+     WHERE id = 1`,
+    [
+      input.region,
+      input.locale,
+      input.currencyCode,
+      input.logoUrl,
+      input.invoiceTitle,
+      input.invoiceSubtitle,
+      input.purchaseOrderTitle,
+      input.purchaseOrderSubtitle,
+      input.printFooterNote,
+      input.accentColor
+    ]
+  );
+
+  await recordAudit(pool, input.userId, "update", "settings", "System Settings", "Updated regional, branding and document layout settings.");
+}
+
 export async function getDashboardData(currentUser: SessionUser | null): Promise<DashboardData> {
   if (!hasDatabase()) {
     return getDemoDashboardData(currentUser);
@@ -352,6 +527,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
 
   await ensureDatabase();
   const pool = getPool();
+  const settings = await getSystemSettings();
 
   const [users, products, customers, suppliers, salesOrders, purchaseOrders, productionTransactions, stockMovements, inventory, auditLogs] =
     await Promise.all([
@@ -360,7 +536,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
       pool.query("SELECT id, name, segment, city, email, phone, receivable FROM customers ORDER BY name"),
       pool.query("SELECT id, name, material, rating, lead_time_days, status, email, phone FROM suppliers ORDER BY name"),
       pool.query(
-        `SELECT so.id, so.order_no, so.customer_id, c.name AS customer, so.city, so.status, so.amount, so.delivery_date,
+        `SELECT so.id, so.order_no, so.invoice_no, so.customer_id, c.name AS customer, so.city, so.status, so.amount, so.delivery_date,
                 soi.product_id, p.name AS product_name, soi.quantity_cases, soi.unit_price, so.created_at
          FROM sales_orders so
          JOIN customers c ON c.id = so.customer_id
@@ -385,7 +561,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
          FROM stock_movements sm
          JOIN products p ON p.id = sm.product_id
          ORDER BY sm.created_at DESC
-         LIMIT 30`
+         LIMIT 40`
       ),
       pool.query(
         `SELECT p.id AS product_id, p.code, p.name AS product_name, p.category, p.storage, p.reorder_level_cases,
@@ -410,12 +586,13 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
   const salesOrderRows = salesOrders.rows.map((row) => ({
     id: row.id,
     orderNo: row.order_no,
+    invoiceNo: row.invoice_no,
     customerId: row.customer_id,
     customer: row.customer,
     city: row.city,
     status: row.status,
     amount: Number(row.amount),
-    deliveryDate: String(row.delivery_date).slice(0, 10),
+    deliveryDate: toIsoDate(row.delivery_date),
     productId: row.product_id,
     productName: row.product_name,
     quantityCases: row.quantity_cases,
@@ -430,7 +607,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     supplier: row.supplier,
     material: row.material,
     status: row.status,
-    expectedDate: String(row.expected_date).slice(0, 10),
+    expectedDate: toIsoDate(row.expected_date),
     quantityCases: row.quantity_cases,
     cost: Number(row.cost),
     createdAt: row.created_at.toISOString()
@@ -456,7 +633,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     quantityCases: row.quantity_cases,
     zone: row.zone,
     batchCode: row.batch_code,
-    expiryDate: row.expiry_date ? String(row.expiry_date).slice(0, 10) : "",
+    expiryDate: toIsoDate(row.expiry_date),
     referenceType: row.reference_type,
     referenceId: row.reference_id,
     notes: row.notes,
@@ -497,10 +674,37 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     mode: "database",
     databaseReady: true,
     currentUser,
+    settings,
     users: users.rows.map(mapUser),
-    products: products.rows.map((row) => ({ id: row.id, code: row.code, name: row.name, category: row.category, unitPrice: Number(row.unit_price), storage: row.storage, shelfLifeDays: row.shelf_life_days, reorderLevelCases: row.reorder_level_cases })),
-    customers: customers.rows.map((row) => ({ id: row.id, name: row.name, segment: row.segment, city: row.city, email: row.email, phone: row.phone, receivable: Number(row.receivable) })),
-    suppliers: suppliers.rows.map((row) => ({ id: row.id, name: row.name, material: row.material, rating: Number(row.rating), leadTimeDays: row.lead_time_days, status: row.status, email: row.email, phone: row.phone })),
+    products: products.rows.map((row) => ({
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      category: row.category,
+      unitPrice: Number(row.unit_price),
+      storage: row.storage,
+      shelfLifeDays: row.shelf_life_days,
+      reorderLevelCases: row.reorder_level_cases
+    })),
+    customers: customers.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      segment: row.segment,
+      city: row.city,
+      email: row.email,
+      phone: row.phone,
+      receivable: Number(row.receivable)
+    })),
+    suppliers: suppliers.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      material: row.material,
+      rating: Number(row.rating),
+      leadTimeDays: row.lead_time_days,
+      status: row.status,
+      email: row.email,
+      phone: row.phone
+    })),
     salesOrders: salesOrderRows,
     purchaseOrders: purchaseOrderRows,
     productionTransactions: productionRows,
@@ -508,8 +712,8 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     auditLogs: auditRows,
     inventory: inventoryRows,
     kpis: [
-      { label: "Inventory Value", value: inventoryRows.reduce((sum, row) => sum + row.onHandCases, 0).toLocaleString(), note: "Cases currently in stock", tone: "warning" },
-      { label: "Revenue", value: revenue.toLocaleString(), note: "Sales order total", tone: "success" },
+      { label: "Inventory Cases", value: inventoryRows.reduce((sum, row) => sum + row.onHandCases, 0).toLocaleString(), note: "Cases currently in stock", tone: "warning" },
+      { label: "Revenue", value: revenue.toLocaleString(), note: "Invoiced sales value", tone: "success" },
       { label: "Receivables", value: receivable.toLocaleString(), note: "Open customer balances", tone: "neutral" },
       { label: "Payables", value: payable.toLocaleString(), note: "Outstanding supplier value", tone: "danger" }
     ],
@@ -527,6 +731,7 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
     customerId: index + 1,
     productId: index + 1,
     ...order,
+    invoiceNo: `INV-${DEFAULT_COUNTER_START + index}`,
     createdAt: new Date().toISOString()
   }));
 
@@ -562,6 +767,7 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
     mode: "demo",
     databaseReady: false,
     currentUser,
+    settings: defaultSystemSettings,
     users: defaultUsers.map((user, index) => ({ id: index + 1, username: user.username, displayName: user.displayName, role: user.role })),
     products: seedProducts.map((row, index) => ({ id: index + 1, ...row })),
     customers: seedCustomers.map((row, index) => ({ id: index + 1, ...row })),
@@ -588,13 +794,51 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
     ],
     inventory,
     kpis: [
-      { label: "Inventory Value", value: "1,657", note: "Cases currently in stock", tone: "warning" },
+      { label: "Inventory Cases", value: "1,657", note: "Cases currently in stock", tone: "warning" },
       { label: "Revenue", value: "38,900", note: "Demo sales order total", tone: "success" },
       { label: "Receivables", value: "55,200", note: "Open customer balances", tone: "neutral" },
       { label: "Payables", value: "24,900", note: "Outstanding supplier value", tone: "danger" }
     ],
     alerts: ["3 items are below minimum stock level.", "2 purchase orders are pending receipt.", "Connect Railway Postgres to enable full editing, deletes and password changes."]
   };
+}
+
+async function replaceSalesOrderMovement(pool: Pool, input: {
+  salesOrderId: number;
+  productId: number;
+  quantityCases: number;
+  deliveryDate: string;
+  zone: string;
+  batchCode: string;
+  invoiceNo: string;
+  userId: number | null;
+}) {
+  await pool.query(`DELETE FROM stock_movements WHERE reference_type = 'invoice' AND reference_id = $1`, [input.invoiceNo]);
+
+  await pool.query(
+    `INSERT INTO stock_movements
+      (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
+     VALUES ($1, 'OUT', $2, $3, $4, $5, 'invoice', $6, $7, $8)`,
+    [input.productId, input.quantityCases, input.zone, input.batchCode, input.deliveryDate || null, input.invoiceNo, "Inventory issued through invoice", input.userId]
+  );
+}
+
+async function replaceProductionMovement(pool: Pool, input: {
+  batchNo: string;
+  productId: number;
+  producedCases: number;
+  userId: number | null;
+}) {
+  await pool.query(`DELETE FROM stock_movements WHERE reference_type = 'production' AND reference_id = $1`, [input.batchNo]);
+
+  if (input.producedCases > 0) {
+    await pool.query(
+      `INSERT INTO stock_movements
+        (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
+       VALUES ($1, 'IN', $2, 'Finished Goods', $3, NULL, 'production', $4, $5, $6)`,
+      [input.productId, input.producedCases, input.batchNo, input.batchNo, "Finished production receipt", input.userId]
+    );
+  }
 }
 
 export async function createProduct(input: { code: string; name: string; category: string; unitPrice: number; storage: string; shelfLifeDays: number; reorderLevelCases: number; userId: number | null }) {
@@ -659,6 +903,10 @@ export async function deleteCustomer(id: number, userId: number | null) {
   await ensureDatabase();
   const pool = getPool();
   const label = await pool.query("SELECT name FROM customers WHERE id = $1", [id]);
+  const invoices = await pool.query("SELECT invoice_no FROM sales_orders WHERE customer_id = $1", [id]);
+  for (const row of invoices.rows) {
+    await pool.query("DELETE FROM stock_movements WHERE reference_type = 'invoice' AND reference_id = $1", [row.invoice_no]);
+  }
   await pool.query("DELETE FROM sales_order_items WHERE sales_order_id IN (SELECT id FROM sales_orders WHERE customer_id = $1)", [id]);
   await pool.query("DELETE FROM sales_orders WHERE customer_id = $1", [id]);
   await pool.query("DELETE FROM customers WHERE id = $1", [id]);
@@ -697,54 +945,105 @@ export async function deleteSupplier(id: number, userId: number | null) {
   await recordAudit(pool, userId, "delete", "supplier", label.rows[0]?.name ?? `Supplier ${id}`, "Deleted supplier and related purchase orders.");
 }
 
-export async function createSalesOrder(input: { orderNo: string; customerId: number; productId: number; quantityCases: number; unitPrice: number; status: string; deliveryDate: string; zone: string; batchCode: string; expiryDate: string; userId: number | null }) {
+export async function createSalesOrder(input: {
+  customerId: number;
+  productId: number;
+  quantityCases: number;
+  unitPrice: number;
+  status: string;
+  deliveryDate: string;
+  zone: string;
+  batchCode: string;
+  userId: number | null;
+}) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
   const customer = await pool.query("SELECT city, name FROM customers WHERE id = $1", [input.customerId]);
   const amount = input.quantityCases * input.unitPrice;
+  const orderNo = await getNextDocumentNumber(pool, "sales_order", "SO-");
+  const invoiceNo = await getNextDocumentNumber(pool, "invoice", "INV-");
+
   const order = await pool.query(
-    `INSERT INTO sales_orders (order_no, customer_id, city, status, amount, delivery_date, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-    [input.orderNo, input.customerId, customer.rows[0]?.city ?? "", input.status, amount, input.deliveryDate, input.userId]
+    `INSERT INTO sales_orders (order_no, invoice_no, customer_id, city, status, amount, delivery_date, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+    [orderNo, invoiceNo, input.customerId, customer.rows[0]?.city ?? "", input.status, amount, input.deliveryDate, input.userId]
   );
+
   await pool.query(
     `INSERT INTO sales_order_items (sales_order_id, product_id, quantity_cases, unit_price) VALUES ($1, $2, $3, $4)`,
     [order.rows[0].id, input.productId, input.quantityCases, input.unitPrice]
   );
-  await pool.query(
-    `INSERT INTO stock_movements (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
-     VALUES ($1, 'OUT', $2, $3, $4, $5, 'sales-order', $6, $7, $8)`,
-    [input.productId, input.quantityCases, input.zone, input.batchCode, input.expiryDate || null, input.orderNo, "Reserved and dispatched against sales order", input.userId]
-  );
-  await recordAudit(pool, input.userId, "create", "sales-order", input.orderNo, `Created sales order for ${customer.rows[0]?.name ?? "customer"}.`);
+
+  await replaceSalesOrderMovement(pool, {
+    salesOrderId: order.rows[0].id,
+    productId: input.productId,
+    quantityCases: input.quantityCases,
+    deliveryDate: input.deliveryDate,
+    zone: input.zone,
+    batchCode: input.batchCode,
+    invoiceNo,
+    userId: input.userId
+  });
+
+  await recordAudit(pool, input.userId, "create", "sales-order", orderNo, `Created order ${orderNo} with invoice ${invoiceNo} for ${customer.rows[0]?.name ?? "customer"}.`);
 }
 
-export async function updateSalesOrder(input: { id: number; orderNo: string; customerId: number; productId: number; quantityCases: number; unitPrice: number; status: string; deliveryDate: string; userId: number | null }) {
+export async function updateSalesOrder(input: {
+  id: number;
+  orderNo: string;
+  invoiceNo: string;
+  customerId: number;
+  productId: number;
+  quantityCases: number;
+  unitPrice: number;
+  status: string;
+  deliveryDate: string;
+  zone: string;
+  batchCode: string;
+  userId: number | null;
+}) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
   const customer = await pool.query("SELECT city FROM customers WHERE id = $1", [input.customerId]);
   const amount = input.quantityCases * input.unitPrice;
+
   await pool.query(
-    `UPDATE sales_orders SET order_no = $2, customer_id = $3, city = $4, status = $5, amount = $6, delivery_date = $7 WHERE id = $1`,
-    [input.id, input.orderNo, input.customerId, customer.rows[0]?.city ?? "", input.status, amount, input.deliveryDate]
+    `UPDATE sales_orders SET customer_id = $2, city = $3, status = $4, amount = $5, delivery_date = $6 WHERE id = $1`,
+    [input.id, input.customerId, customer.rows[0]?.city ?? "", input.status, amount, input.deliveryDate]
   );
   await pool.query(
     `UPDATE sales_order_items SET product_id = $2, quantity_cases = $3, unit_price = $4 WHERE sales_order_id = $1`,
     [input.id, input.productId, input.quantityCases, input.unitPrice]
   );
-  await recordAudit(pool, input.userId, "update", "sales-order", input.orderNo, "Updated sales order.");
+
+  await replaceSalesOrderMovement(pool, {
+    salesOrderId: input.id,
+    productId: input.productId,
+    quantityCases: input.quantityCases,
+    deliveryDate: input.deliveryDate,
+    zone: input.zone,
+    batchCode: input.batchCode,
+    invoiceNo: input.invoiceNo,
+    userId: input.userId
+  });
+
+  await recordAudit(pool, input.userId, "update", "sales-order", input.orderNo, "Updated sales order and synchronized invoice stock issue.");
 }
 
 export async function deleteSalesOrder(id: number, userId: number | null) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
-  const label = await pool.query("SELECT order_no FROM sales_orders WHERE id = $1", [id]);
+  const label = await pool.query("SELECT order_no, invoice_no FROM sales_orders WHERE id = $1", [id]);
+  const invoiceNo = label.rows[0]?.invoice_no;
+  if (invoiceNo) {
+    await pool.query("DELETE FROM stock_movements WHERE reference_type = 'invoice' AND reference_id = $1", [invoiceNo]);
+  }
   await pool.query("DELETE FROM sales_order_items WHERE sales_order_id = $1", [id]);
   await pool.query("DELETE FROM sales_orders WHERE id = $1", [id]);
-  await recordAudit(pool, userId, "delete", "sales-order", label.rows[0]?.order_no ?? `Order ${id}`, "Deleted sales order.");
+  await recordAudit(pool, userId, "delete", "sales-order", label.rows[0]?.order_no ?? `Order ${id}`, "Deleted sales order and removed related inventory issue.");
 }
 
 export async function createPurchaseOrder(input: { poNo: string; supplierId: number; material: string; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
@@ -756,7 +1055,7 @@ export async function createPurchaseOrder(input: { poNo: string; supplierId: num
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [input.poNo, input.supplierId, input.material, input.status, input.expectedDate, input.quantityCases, input.cost, input.userId]
   );
-  await recordAudit(pool, input.userId, "create", "purchase-order", input.poNo, "Created purchase order.");
+  await recordAudit(pool, input.userId, "create", "purchase-order", input.poNo, "Created raw material purchase order.");
 }
 
 export async function updatePurchaseOrder(input: { id: number; poNo: string; supplierId: number; material: string; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
@@ -769,7 +1068,7 @@ export async function updatePurchaseOrder(input: { id: number; poNo: string; sup
      WHERE id = $1`,
     [input.id, input.poNo, input.supplierId, input.material, input.status, input.expectedDate, input.quantityCases, input.cost]
   );
-  await recordAudit(pool, input.userId, "update", "purchase-order", input.poNo, "Updated purchase order.");
+  await recordAudit(pool, input.userId, "update", "purchase-order", input.poNo, "Updated raw material purchase order.");
 }
 
 export async function deletePurchaseOrder(id: number, userId: number | null) {
@@ -791,17 +1090,18 @@ export async function createProductionTransaction(input: { batchNo: string; prod
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     [input.batchNo, input.productId, input.line, input.status, input.plannedCases, input.producedCases, input.userId]
   );
-  if (input.producedCases > 0) {
-    await pool.query(
-      `INSERT INTO stock_movements (product_id, movement_type, quantity_cases, zone, batch_code, expiry_date, reference_type, reference_id, notes, created_by)
-       VALUES ($1, 'IN', $2, 'Finished Goods', $3, NULL, 'production', $4, $5, $6)`,
-      [input.productId, input.producedCases, input.batchNo, input.batchNo, "Finished production receipt", input.userId]
-    );
-  }
-  await recordAudit(pool, input.userId, "create", "production", input.batchNo, `Recorded production for ${product.rows[0]?.name ?? "product"}.`);
+
+  await replaceProductionMovement(pool, {
+    batchNo: input.batchNo,
+    productId: input.productId,
+    producedCases: input.producedCases,
+    userId: input.userId
+  });
+
+  await recordAudit(pool, input.userId, "create", "production", input.batchNo, `Recorded production for ${product.rows[0]?.name ?? "product"} and posted inventory receipt.`);
 }
 
-export async function updateProductionTransaction(input: { id: number; batchNo: string; productId: number; line: string; status: string; plannedCases: number; producedCases: number; userId: number | null }) {
+export async function updateProductionTransaction(input: { id: number; batchNo: string; previousBatchNo: string; productId: number; line: string; status: string; plannedCases: number; producedCases: number; userId: number | null }) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
@@ -812,7 +1112,19 @@ export async function updateProductionTransaction(input: { id: number; batchNo: 
      WHERE id = $1`,
     [input.id, input.batchNo, input.productId, input.line, input.status, input.plannedCases, input.producedCases]
   );
-  await recordAudit(pool, input.userId, "update", "production", input.batchNo, `Updated production for ${product.rows[0]?.name ?? "product"}.`);
+
+  if (input.previousBatchNo !== input.batchNo) {
+    await pool.query(`DELETE FROM stock_movements WHERE reference_type = 'production' AND reference_id = $1`, [input.previousBatchNo]);
+  }
+
+  await replaceProductionMovement(pool, {
+    batchNo: input.batchNo,
+    productId: input.productId,
+    producedCases: input.producedCases,
+    userId: input.userId
+  });
+
+  await recordAudit(pool, input.userId, "update", "production", input.batchNo, `Updated production for ${product.rows[0]?.name ?? "product"} and synchronized inventory receipt.`);
 }
 
 export async function deleteProductionTransaction(id: number, userId: number | null) {
@@ -820,8 +1132,12 @@ export async function deleteProductionTransaction(id: number, userId: number | n
   await ensureDatabase();
   const pool = getPool();
   const label = await pool.query("SELECT batch_no FROM production_transactions WHERE id = $1", [id]);
+  const batchNo = label.rows[0]?.batch_no;
+  if (batchNo) {
+    await pool.query(`DELETE FROM stock_movements WHERE reference_type = 'production' AND reference_id = $1`, [batchNo]);
+  }
   await pool.query("DELETE FROM production_transactions WHERE id = $1", [id]);
-  await recordAudit(pool, userId, "delete", "production", label.rows[0]?.batch_no ?? `Batch ${id}`, "Deleted production transaction.");
+  await recordAudit(pool, userId, "delete", "production", batchNo ?? `Batch ${id}`, "Deleted production transaction and removed related inventory receipt.");
 }
 
 export async function createStockMovement(input: { productId: number; movementType: "IN" | "OUT" | "ADJUSTMENT"; quantityCases: number; zone: string; batchCode: string; expiryDate: string; referenceType: string; referenceId: string; notes: string; userId: number | null }) {
@@ -835,4 +1151,54 @@ export async function createStockMovement(input: { productId: number; movementTy
     [input.productId, input.movementType, input.quantityCases, input.zone, input.batchCode, input.expiryDate || null, input.referenceType, input.referenceId, input.notes, input.userId]
   );
   await recordAudit(pool, input.userId, "create", "stock-movement", input.referenceId, `${input.movementType} ${input.quantityCases} cases for ${product.rows[0]?.name ?? "product"}.`);
+}
+
+export async function resetDatabaseToSeed(userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+
+  await pool.query("TRUNCATE TABLE audit_logs, stock_movements, production_transactions, purchase_orders, sales_order_items, sales_orders, suppliers, customers, products, users, document_counters RESTART IDENTITY CASCADE");
+  await seedDatabase(pool);
+  await recordAudit(pool, userId, "reset", "system", "Database Reset", "Cleared all records and reloaded demo seed data.");
+}
+
+export async function exportBackupData() {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const [users, products, customers, suppliers, salesOrders, salesOrderItems, purchaseOrders, productionTransactions, stockMovements, auditLogs, counters, settings] =
+    await Promise.all([
+      pool.query("SELECT id, username, display_name, role, created_at FROM users ORDER BY id"),
+      pool.query("SELECT * FROM products ORDER BY id"),
+      pool.query("SELECT * FROM customers ORDER BY id"),
+      pool.query("SELECT * FROM suppliers ORDER BY id"),
+      pool.query("SELECT * FROM sales_orders ORDER BY id"),
+      pool.query("SELECT * FROM sales_order_items ORDER BY id"),
+      pool.query("SELECT * FROM purchase_orders ORDER BY id"),
+      pool.query("SELECT * FROM production_transactions ORDER BY id"),
+      pool.query("SELECT * FROM stock_movements ORDER BY id"),
+      pool.query("SELECT * FROM audit_logs ORDER BY id"),
+      pool.query("SELECT * FROM document_counters ORDER BY counter_name"),
+      pool.query("SELECT * FROM system_settings ORDER BY id")
+    ]);
+
+  return {
+    exportedAt: new Date().toISOString(),
+    company: companyName,
+    tables: {
+      users: users.rows,
+      products: products.rows,
+      customers: customers.rows,
+      suppliers: suppliers.rows,
+      salesOrders: salesOrders.rows,
+      salesOrderItems: salesOrderItems.rows,
+      purchaseOrders: purchaseOrders.rows,
+      productionTransactions: productionTransactions.rows,
+      stockMovements: stockMovements.rows,
+      auditLogs: auditLogs.rows,
+      documentCounters: counters.rows,
+      systemSettings: settings.rows
+    }
+  };
 }

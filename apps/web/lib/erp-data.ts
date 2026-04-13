@@ -42,6 +42,7 @@ export type SupplierRecord = {
 export type SalesOrderRecord = {
   id: number;
   orderNo: string;
+  invoiceNo: string;
   customerId: number;
   customer: string;
   city: string;
@@ -126,11 +127,25 @@ export type Kpi = {
   tone?: "neutral" | "success" | "warning" | "danger";
 };
 
+export type SystemSettings = {
+  region: string;
+  locale: string;
+  currencyCode: string;
+  logoUrl: string;
+  invoiceTitle: string;
+  invoiceSubtitle: string;
+  purchaseOrderTitle: string;
+  purchaseOrderSubtitle: string;
+  printFooterNote: string;
+  accentColor: string;
+};
+
 export type DashboardData = {
   company: string;
   mode: "database" | "demo";
   databaseReady: boolean;
   currentUser: SessionUser | null;
+  settings: SystemSettings;
   users: SessionUser[];
   products: ProductRecord[];
   customers: CustomerRecord[];
@@ -146,6 +161,39 @@ export type DashboardData = {
 };
 
 export const companyName = "Spring Foods";
+
+export const defaultSystemSettings: SystemSettings = {
+  region: "Saudi Arabia",
+  locale: "en-SA",
+  currencyCode: "SAR",
+  logoUrl: "",
+  invoiceTitle: "Sales Invoice",
+  invoiceSubtitle: "Frozen food distribution and manufacturing",
+  purchaseOrderTitle: "Purchase Order",
+  purchaseOrderSubtitle: "Procurement document",
+  printFooterNote: "Thank you for choosing Spring Foods.",
+  accentColor: "#4cc3d9"
+};
+
+export const regionalOptions = [
+  { value: "Saudi Arabia", label: "Saudi Arabia", locale: "en-SA" },
+  { value: "United Arab Emirates", label: "United Arab Emirates", locale: "en-AE" },
+  { value: "Qatar", label: "Qatar", locale: "en-QA" },
+  { value: "Kuwait", label: "Kuwait", locale: "en-KW" },
+  { value: "Bahrain", label: "Bahrain", locale: "en-BH" },
+  { value: "Oman", label: "Oman", locale: "en-OM" },
+  { value: "Pakistan", label: "Pakistan", locale: "en-PK" }
+] as const;
+
+export const currencyOptions = [
+  { value: "SAR", label: "Saudi Riyal (SAR)" },
+  { value: "AED", label: "UAE Dirham (AED)" },
+  { value: "QAR", label: "Qatari Riyal (QAR)" },
+  { value: "KWD", label: "Kuwaiti Dinar (KWD)" },
+  { value: "BHD", label: "Bahraini Dinar (BHD)" },
+  { value: "OMR", label: "Omani Rial (OMR)" },
+  { value: "PKR", label: "Pakistani Rupee (PKR)" }
+] as const;
 
 export const roleLabels: Record<UserRole, string> = {
   admin: "Administrator",
@@ -181,9 +229,9 @@ export const seedSuppliers = [
 ];
 
 export const seedSalesOrders = [
-  { orderNo: "SO-4108", customer: "Arctic Mart", city: "Riyadh", status: "Packed" as const, amount: 12400, deliveryDate: "2026-04-14", productName: "Chicken Nuggets 1kg", quantityCases: 443, unitPrice: 28 },
-  { orderNo: "SO-4109", customer: "Fresh Basket", city: "Jeddah", status: "In Transit" as const, amount: 8900, deliveryDate: "2026-04-13", productName: "Mixed Vegetables 900g", quantityCases: 524, unitPrice: 17 },
-  { orderNo: "SO-4110", customer: "Golden Spoon Catering", city: "Dammam", status: "Confirmed" as const, amount: 17600, deliveryDate: "2026-04-15", productName: "Beef Burger Patties 1kg", quantityCases: 533, unitPrice: 33 }
+  { orderNo: "SO-101", customer: "Arctic Mart", city: "Riyadh", status: "Packed" as const, amount: 12400, deliveryDate: "2026-04-14", productName: "Chicken Nuggets 1kg", quantityCases: 443, unitPrice: 28 },
+  { orderNo: "SO-102", customer: "Fresh Basket", city: "Jeddah", status: "In Transit" as const, amount: 8900, deliveryDate: "2026-04-13", productName: "Mixed Vegetables 900g", quantityCases: 524, unitPrice: 17 },
+  { orderNo: "SO-103", customer: "Golden Spoon Catering", city: "Dammam", status: "Confirmed" as const, amount: 17600, deliveryDate: "2026-04-15", productName: "Beef Burger Patties 1kg", quantityCases: 533, unitPrice: 33 }
 ];
 
 export const seedPurchaseOrders = [
@@ -203,10 +251,10 @@ export const seedStockMovements = [
   { productCode: "FF-104", movementType: "IN" as const, quantityCases: 302, zone: "Cold Room A", batchCode: "B-217", expiryDate: "2026-05-19", referenceType: "opening-balance", referenceId: "OPEN-4", notes: "Opening balance" }
 ];
 
-export function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-US", {
+export function formatCurrency(value: number, currencyCode = defaultSystemSettings.currencyCode, locale = defaultSystemSettings.locale) {
+  return new Intl.NumberFormat(locale, {
     style: "currency",
-    currency: "USD",
+    currency: currencyCode,
     maximumFractionDigits: 0
   }).format(value);
 }

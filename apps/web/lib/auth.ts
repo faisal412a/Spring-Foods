@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { SessionUser, defaultUsers } from "./erp-data";
 import { findUserByUsername, getUserById, hasDatabase } from "./db";
 import { createPasswordHash, signValue } from "./security";
@@ -87,4 +88,12 @@ export async function getSessionUser() {
   }
 
   return getUserById(userId);
+}
+
+export async function requireSessionUser() {
+  const user = await getSessionUser();
+  if (!user) {
+    redirect("/login");
+  }
+  return user;
 }
