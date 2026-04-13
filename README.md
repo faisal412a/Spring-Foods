@@ -1,20 +1,15 @@
 # Frozen Food ERP
 
-This repository now contains a web-based ERP starter for a frozen-food business.
+This repository now contains a web-based ERP for a frozen-food business.
 
-The current version is built to be easy to understand and easy to deploy, especially if you are new to coding. It includes a polished web dashboard with seeded business data for these modules:
+The current version is designed to stay understandable while also being practical enough for daily use. It now includes:
 
-- Dashboard
-- Inventory
-- Products
-- Sales Orders
-- Purchasing
-- Production
-- Cold Chain
-- Customers
-- Suppliers
-- HR & Payroll
-- Accounting
+- Login and user roles
+- Railway-friendly Postgres persistence
+- Product, customer, supplier and order forms
+- Invoice pages and CSV report exports
+- Stock movement tracking with inventory updates
+- Frozen-food dashboard and cold-chain monitoring
 
 ## What You Can Run Right Now
 
@@ -23,14 +18,12 @@ The main app is the Next.js web app in [apps/web](/Users/faisalzahid/Documents/N
 It already includes:
 
 - An ERP dashboard for frozen-food operations
-- Inventory with batch and expiry data
-- Product catalog
-- Sales, purchasing and production views
+- Product, customer and supplier master data
+- Sales order entry with invoice pages
+- Stock movement ledger and inventory rollup
+- Role-based access for admin, sales, warehouse and accounts
 - Cold-chain temperature monitoring
-- Customer and supplier management views
-- HR and payroll summary
-- Accounting summary
-- API endpoints for health and ERP data
+- API endpoints for health, ERP data and CSV exports
 
 ## Project Structure
 
@@ -62,6 +55,8 @@ The web app exposes:
 
 - `/api/health`
 - `/api/erp`
+- `/api/reports/sales.csv`
+- `/api/reports/inventory.csv`
 
 ## Railway Deployment
 
@@ -71,16 +66,22 @@ The easiest path is to deploy only the web app first. The step-by-step guide is 
 
 ## Important Note
 
-This is a strong starter ERP foundation, not yet a finished enterprise product. Real production rollout usually adds:
+For practical use in Railway, add these environment variables:
 
-- User login and permissions
-- Persistent database records
-- Create and edit forms
-- Invoice PDF generation
+- `DATABASE_URL`
+- `AUTH_SECRET`
+
+If `DATABASE_URL` is missing, the app falls back to demo mode and disables permanent record creation.
+
+## Important Note
+
+This is a practical ERP starter, not yet a finished enterprise rollout. Real production rollout usually adds:
+
+- Password reset and email verification
+- Field-level edit history
+- Dedicated PDF generation service
 - Barcode or QR batch scanning
 - Warehouse handheld workflows
 - Approval rules
 - Audit logs
 - Backup and restore
-
-If you want, the next step after deployment can be turning this starter into a full live system with login, database persistence, and real data entry screens.
