@@ -39,7 +39,17 @@ If you need help with GitHub upload, use the existing guide in:
 3. Choose `Deploy from GitHub repo`
 4. Select your repository
 
-## 3. Configure The Web Service
+## 3. Add Railway Postgres
+
+For the upgraded practical ERP, you should attach a Postgres database.
+
+1. In Railway, open your project
+2. Click `New`
+3. Choose `Database`
+4. Choose `Postgres`
+5. Railway will create a `DATABASE_URL` variable automatically for the project
+
+## 4. Configure The Web Service
 
 Open the Railway service settings and use these values:
 
@@ -47,9 +57,13 @@ Open the Railway service settings and use these values:
 - Build Command: `npm install && npm run build:web`
 - Start Command: `npm run start:web`
 
-Leave environment variables empty for now. This ERP starter does not need secrets for the first deployment.
+Add this extra environment variable to the web service:
 
-## 4. Deploy
+- `AUTH_SECRET`
+
+Use a long random value for `AUTH_SECRET`.
+
+## 5. Deploy
 
 1. Save the settings
 2. Click `Deploy`
@@ -57,13 +71,24 @@ Leave environment variables empty for now. This ERP starter does not need secret
 
 When deployment is complete, Railway will give you a public URL.
 
-## 5. Check That It Works
+## 6. Check That It Works
 
 Open your Railway URL and confirm:
 
 - The ERP dashboard loads
-- The left-side module navigation is visible
-- Inventory, sales, cold chain, HR and accounting sections all show data
+- You can sign in with a default account
+- Product, customer, supplier and order sections show records
+- Inventory and stock movement sections load correctly
+- Invoice and CSV report links open correctly
+
+Default starter accounts:
+
+- `admin / admin123`
+- `sales / sales123`
+- `warehouse / warehouse123`
+- `accounts / accounts123`
+
+Change these passwords in the database before real production use.
 
 You can also test these URLs:
 
@@ -74,7 +99,7 @@ Example:
 
 `https://your-app-name.up.railway.app/api/health`
 
-## If Railway Build Fails
+## If Railway Build Or Start Fails
 
 The most common reasons are:
 
@@ -86,28 +111,31 @@ If it fails, copy the Railway build log and send it to me. I can read the error 
 
 ## What This Version Does Today
 
-This version is a deployable ERP starter with example frozen-food data.
+This version is a deployable ERP starter with practical business workflows.
 
 It gives you:
 
 - A professional ERP web interface
-- Frozen-food operations layout
-- Dashboard and module screens
-- API endpoints for future integrations
+- Login and user roles
+- Database-backed records
+- Create forms for core master data and orders
+- Invoice pages
+- CSV reports
+- Stock movement tracking
 
 ## What To Build Next
 
-After your first Railway deployment, I recommend this order:
+After this deployment, I recommend this order:
 
-1. Add login for admin and staff
-2. Add a real database so records can be saved permanently
-3. Add forms to create products, orders and suppliers
-4. Add printable invoices and purchase orders
-5. Add role permissions for warehouse, accounts and HR
-6. Add reports and export to Excel or PDF
+1. Change default passwords
+2. Add edit and delete flows
+3. Add purchase orders and production transactions
+4. Add PDF generation and email delivery
+5. Add audit logs and approvals
+6. Add barcode scanning and handheld warehouse workflows
 
 ## Simple Recommendation
 
-First deploy this exact version as-is.
+Deploy this upgraded version with Railway Postgres connected.
 
-Once it is live, send me the Railway link or the deployment error and I will help you with the next step. Then we can convert it from a starter ERP into a full production system piece by piece.
+Once it is live, test login, create one product, create one customer, create one sales order, and record one stock movement. That will confirm the live persistence path is working end to end.
