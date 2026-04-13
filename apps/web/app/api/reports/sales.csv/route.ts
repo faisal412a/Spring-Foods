@@ -8,11 +8,15 @@ function csvEscape(value: string | number) {
 
 export async function GET() {
   const user = await getSessionUser();
+  if (!user) {
+    return new Response("Unauthorized", { status: 401 });
+  }
   const data = await getDashboardData(user);
-  const header = ["Order No", "Customer", "City", "Product", "Quantity Cases", "Unit Price", "Amount", "Status", "Delivery Date"];
+  const header = ["Order No", "Invoice No", "Customer", "City", "Product", "Quantity Cases", "Unit Price", "Amount", "Status", "Delivery Date"];
   const rows = data.salesOrders.map((order) =>
     [
       order.orderNo,
+      order.invoiceNo,
       order.customer,
       order.city,
       order.productName,

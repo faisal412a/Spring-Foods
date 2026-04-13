@@ -8,6 +8,9 @@ function csvEscape(value: string | number) {
 
 export async function GET() {
   const user = await getSessionUser();
+  if (!user) {
+    return new Response("Unauthorized", { status: 401 });
+  }
   const data = await getDashboardData(user);
   const header = ["Code", "Product", "Category", "On Hand Cases", "Reorder Level", "Zone", "Batch", "Expiry Date"];
   const rows = data.inventory.map((item) =>
