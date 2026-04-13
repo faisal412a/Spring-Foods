@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
-import { getAccountingSummary, getErpData } from "../../../lib/erp-data";
+import { getSessionUser } from "../../../lib/auth";
+import { getDashboardData } from "../../../lib/db";
 
-export function GET() {
+export async function GET() {
+  const user = await getSessionUser();
+  const data = await getDashboardData(user);
+
   return NextResponse.json({
     generatedAt: new Date().toISOString(),
-    company: getErpData().company,
-    data: getErpData(),
-    accounting: getAccountingSummary()
+    company: data.company,
+    mode: data.mode,
+    data
   });
 }
