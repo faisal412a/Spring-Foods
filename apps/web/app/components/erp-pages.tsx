@@ -860,12 +860,12 @@ export function SettingsModule({ data, user, params }: { data: DashboardData; us
           </article>
 
           <article className="panel span-two">
-            <div className="panel-head"><div><p className="section-kicker">Reset</p><h2>Wipe live data and reload demo set</h2></div></div>
+            <div className="panel-head"><div><p className="section-kicker">Reset</p><h2>Clear operational data only</h2></div></div>
             {user.role === "admin" && data.databaseReady ? (
               <form action={resetDataAction} className="form-grid">
                 {hiddenReturn("/settings")}
-                <div className="inline-note">This clears all live ERP records and reloads the starter demo data.</div>
-                <button type="submit" className="toolbar-button danger-button">Wipe all data and reset demo</button>
+                <div className="inline-note">This clears products, raw materials, suppliers, customers, orders, purchasing, production, inventory, and audit history. It keeps users, region, currency, logo, and document layout settings.</div>
+                <button type="submit" className="toolbar-button danger-button">Clear all ERP data and start clean</button>
               </form>
             ) : user.role === "admin" ? (
               <p>Reset becomes available after Railway Postgres is connected.</p>

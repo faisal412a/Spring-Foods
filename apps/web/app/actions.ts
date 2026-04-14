@@ -26,7 +26,7 @@ import {
   deleteRawMaterial,
   deleteSalesOrder,
   deleteSupplier,
-  resetDatabaseToSeed,
+  clearOperationalData,
   updateSystemSettings,
   updateCustomer,
   updatePurchaseOrder,
@@ -547,7 +547,7 @@ export async function resetDataAction(formData: FormData) {
   try {
     const user = await requireLoggedInUser();
     if (user.role !== "admin") finishWithMessage(returnTo, "error", "Only admin can reset the database.");
-    await resetDatabaseToSeed(user.id);
+    await clearOperationalData(user.id);
     revalidatePath("/dashboard");
     revalidatePath("/products");
     revalidatePath("/inventory");
@@ -558,7 +558,7 @@ export async function resetDataAction(formData: FormData) {
     revalidatePath("/finance");
     revalidatePath("/settings");
     revalidatePath("/audit");
-    finishWithMessage("/settings", "success", "All live data was cleared and demo data was reloaded");
+    finishWithMessage("/settings", "success", "Operational data was cleared. Users and ERP settings were preserved");
   } catch (error) {
     finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to reset data.");
   }

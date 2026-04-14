@@ -1253,14 +1253,15 @@ export async function createStockMovement(input: { productId: number; movementTy
   await recordAudit(pool, input.userId, "create", "stock-movement", input.referenceId, `${input.movementType} ${input.quantityCases} cases for ${product.rows[0]?.name ?? "product"}.`);
 }
 
-export async function resetDatabaseToSeed(userId: number | null) {
+export async function clearOperationalData(userId: number | null) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
 
-  await pool.query("TRUNCATE TABLE audit_logs, stock_movements, production_transactions, purchase_orders, sales_order_items, sales_orders, raw_materials, suppliers, customers, products, users, document_counters, system_settings RESTART IDENTITY CASCADE");
-  await seedDatabase(pool);
-  await recordAudit(pool, userId, "reset", "system", "Database Reset", "Cleared all records and reloaded demo seed data.");
+  await pool.query("TRUNCATE TABLE stock_movements, production_transactions, purchase_orders, sales_order_items, sales_orders, raw_materials, suppliers, customers, products, audit_logs RESTART IDENTITY CASCADE");
+  await pool.query("DELETE FROM document_counters");
+  await initializeCounters(pool);
+  await recordAudit(pool, userId, "reset", "system", "Operational Data Cleared", "Cleared products, raw materials, suppliers, customers, orders, purchasing, production, inventory, and audit history while preserving users and ERP settings.");
 }
 
 export async function exportBackupData() {
