@@ -5,6 +5,7 @@ import {
   createProductAction,
   createProductionTransactionAction,
   createPurchaseOrderAction,
+  createRawMaterialAction,
   createSalesOrderAction,
   createSupplierAction,
   deleteCustomerAction,
@@ -13,12 +14,14 @@ import {
   deletePurchaseOrderAction,
   deleteSalesOrderAction,
   deleteSupplierAction,
+  deleteRawMaterialAction,
   resetDataAction,
   saveSettingsAction,
   updateCustomerAction,
   updateProductAction,
   updateProductionTransactionAction,
   updatePurchaseOrderAction,
+  updateRawMaterialAction,
   updateSalesOrderAction,
   updateSupplierAction
 } from "../actions";
@@ -257,6 +260,70 @@ export function ProductsModule({ data, user, params }: { data: DashboardData; us
   );
 }
 
+export function RawMaterialsModule({ data, user, params }: { data: DashboardData; user: SessionUser; params: SearchMap }) {
+  if (!canManageMasterData(user.role) && !canManagePurchases(user.role)) {
+    return <AccessDenied message="Only admin and purchasing users can view raw materials." />;
+  }
+
+  const editId = Number(readParam(params.rawMaterialId)) || 0;
+  const editingRawMaterial = data.rawMaterials.find((item) => item.id === editId);
+  const canEdit = canManageMasterData(user.role);
+
+  return (
+    <section className="module-grid">
+      <article className="panel span-two">
+        <div className="panel-head"><div><p className="section-kicker">Raw Materials</p><h2>Purchased material overview</h2></div></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Code</th><th>Name</th><th>Category</th><th>Unit</th><th>Reorder</th><th>Last Purchase</th><th>Total Purchased</th><th>Actions</th></tr></thead>
+            <tbody>
+              {data.rawMaterials.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.code}</td>
+                  <td>{item.name}</td>
+                  <td>{item.category}</td>
+                  <td>{item.unit}</td>
+                  <td>{item.reorderLevel}</td>
+                  <td>{item.lastPurchaseQty}</td>
+                  <td>{item.totalPurchasedQty}</td>
+                  <td className="action-cell">
+                    {canEdit ? <Link href={`/raw-materials?rawMaterialId=${item.id}`} className="text-link">Edit</Link> : null}
+                    {canEdit ? (
+                      <form action={deleteRawMaterialAction}>
+                        {hiddenReturn("/raw-materials")}
+                        <input type="hidden" name="id" value={item.id} />
+                        <button type="submit" className="text-button">Delete</button>
+                      </form>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <article className="panel">
+        <div className="panel-head"><div><p className="section-kicker">{editingRawMaterial ? "Edit Material" : "New Material"}</p><h2>{editingRawMaterial ? editingRawMaterial.name : "Create raw material"}</h2></div></div>
+        {canEdit ? (
+          <form action={editingRawMaterial ? updateRawMaterialAction : createRawMaterialAction} className="form-grid">
+            {hiddenReturn("/raw-materials")}
+            {editingRawMaterial ? <input type="hidden" name="id" value={editingRawMaterial.id} /> : null}
+            <input name="code" placeholder="Code" defaultValue={editingRawMaterial?.code} required />
+            <input name="name" placeholder="Name" defaultValue={editingRawMaterial?.name} required />
+            <input name="category" placeholder="Category" defaultValue={editingRawMaterial?.category} required />
+            <input name="unit" placeholder="Unit (kg, pcs, etc.)" defaultValue={editingRawMaterial?.unit} required />
+            <input name="reorderLevel" type="number" placeholder="Reorder level" defaultValue={editingRawMaterial?.reorderLevel} required />
+            <button type="submit" className="toolbar-button primary-button">{editingRawMaterial ? "Update raw material" : "Create raw material"}</button>
+          </form>
+        ) : (
+          <p>Purchasing users can review purchased quantities here. Admin can add and edit raw materials.</p>
+        )}
+      </article>
+    </section>
+  );
+}
+
 export function InventoryModule({ data }: { data: DashboardData }) {
   return (
     <section className="panel-grid two-up">
@@ -395,6 +462,72 @@ export function CustomersModule({ data, user, params }: { data: DashboardData; u
   );
 }
 
+export function SuppliersModule({ data, user, params }: { data: DashboardData; user: SessionUser; params: SearchMap }) {
+  if (!canManageMasterData(user.role) && !canManagePurchases(user.role)) {
+    return <AccessDenied message="Only admin and purchasing users can view suppliers." />;
+  }
+
+  const supplierEditId = Number(readParam(params.supplierId)) || 0;
+  const editingSupplier = data.suppliers.find((item) => item.id === supplierEditId);
+  const canEdit = canManageMasterData(user.role);
+
+  return (
+    <section className="module-grid">
+      <article className="panel span-two">
+        <div className="panel-head"><div><p className="section-kicker">Suppliers</p><h2>Supplier master</h2></div></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Material</th><th>Rating</th><th>Status</th><th>Phone</th><th>Actions</th></tr></thead>
+            <tbody>
+              {data.suppliers.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.name}</td>
+                  <td>{item.material}</td>
+                  <td>{item.rating}</td>
+                  <td>{item.status}</td>
+                  <td>{item.phone}</td>
+                  <td className="action-cell">
+                    {canEdit ? <Link href={`/suppliers?supplierId=${item.id}`} className="text-link">Edit</Link> : null}
+                    {canEdit ? (
+                      <form action={deleteSupplierAction}>
+                        {hiddenReturn("/suppliers")}
+                        <input type="hidden" name="id" value={item.id} />
+                        <button type="submit" className="text-button">Delete</button>
+                      </form>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <article className="panel">
+        <div className="panel-head"><div><p className="section-kicker">{editingSupplier ? "Edit Supplier" : "New Supplier"}</p><h2>{editingSupplier ? editingSupplier.name : "Create supplier"}</h2></div></div>
+        {canEdit ? (
+          <form action={editingSupplier ? updateSupplierAction : createSupplierAction} className="form-grid">
+            {hiddenReturn("/suppliers")}
+            {editingSupplier ? <input type="hidden" name="id" value={editingSupplier.id} /> : null}
+            <input name="name" placeholder="Name" defaultValue={editingSupplier?.name} required />
+            <input name="material" placeholder="Preferred material" defaultValue={editingSupplier?.material} required />
+            <input name="rating" type="number" step="0.1" placeholder="Rating" defaultValue={editingSupplier?.rating} required />
+            <input name="leadTimeDays" type="number" placeholder="Lead time days" defaultValue={editingSupplier?.leadTimeDays} required />
+            <select name="status" defaultValue={editingSupplier?.status || "Approved"} required>
+              {["Approved", "Review"].map((status) => <option key={status} value={status}>{status}</option>)}
+            </select>
+            <input name="email" type="email" placeholder="Email" defaultValue={editingSupplier?.email} required />
+            <input name="phone" placeholder="Phone" defaultValue={editingSupplier?.phone} required />
+            <button type="submit" className="toolbar-button primary-button">{editingSupplier ? "Update supplier" : "Create supplier"}</button>
+          </form>
+        ) : (
+          <p>Purchasing users can review suppliers here. Admin can add and edit supplier records.</p>
+        )}
+      </article>
+    </section>
+  );
+}
+
 export function OrdersModule({ data, user, params }: { data: DashboardData; user: SessionUser; params: SearchMap }) {
   if (!canManageOrders(user.role)) {
     return <AccessDenied message="Only sales and admin users can manage sales orders." />;
@@ -524,7 +657,10 @@ export function PurchasesModule({ data, user, params }: { data: DashboardData; u
             <option value="">Select supplier</option>
             {data.suppliers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
-          <input name="material" placeholder="Material" defaultValue={editingPurchase?.material} required />
+          <select name="rawMaterialId" defaultValue={editingPurchase?.rawMaterialId || ""} required>
+            <option value="">Select raw material</option>
+            {data.rawMaterials.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
           <select name="status" defaultValue={editingPurchase?.status || "Draft"} required>
             {["Draft", "Sent", "Confirmed", "Received"].map((status) => <option key={status} value={status}>{status}</option>)}
           </select>
@@ -649,9 +785,6 @@ export function FinanceModule({ data, user }: { data: DashboardData; user: Sessi
 
 export function SettingsModule({ data, user, params }: { data: DashboardData; user: SessionUser; params: SearchMap }) {
   const tab = readParam(params.tab) || "system";
-  const supplierEditId = Number(readParam(params.supplierId)) || 0;
-  const editingSupplier = data.suppliers.find((item) => item.id === supplierEditId);
-  const canEditSuppliers = canManageMasterData(user.role);
   const regionLocale = regionalOptions.find((item) => item.value === data.settings.region)?.locale ?? data.settings.locale;
 
   return (
@@ -659,63 +792,10 @@ export function SettingsModule({ data, user, params }: { data: DashboardData; us
       <section className="panel">
         <div className="settings-tabs">
           <Link href="/settings" className={`tab-link ${tab === "system" ? "tab-link-active" : ""}`}>System</Link>
-          <Link href="/settings?tab=suppliers" className={`tab-link ${tab === "suppliers" ? "tab-link-active" : ""}`}>Suppliers</Link>
         </div>
       </section>
 
-      {tab === "suppliers" ? (
-        canEditSuppliers ? (
-          <section className="module-grid">
-            <article className="panel span-two">
-              <div className="panel-head"><div><p className="section-kicker">Suppliers</p><h2>Supplier master</h2></div></div>
-              <div className="table-wrap">
-                <table>
-                  <thead><tr><th>Name</th><th>Material</th><th>Rating</th><th>Status</th><th>Phone</th><th>Actions</th></tr></thead>
-                  <tbody>
-                    {data.suppliers.map((item) => (
-                      <tr key={item.id}>
-                        <td>{item.name}</td>
-                        <td>{item.material}</td>
-                        <td>{item.rating}</td>
-                        <td>{item.status}</td>
-                        <td>{item.phone}</td>
-                        <td className="action-cell">
-                          <Link href={`/settings?tab=suppliers&supplierId=${item.id}`} className="text-link">Edit</Link>
-                          <form action={deleteSupplierAction}>
-                            {hiddenReturn("/settings?tab=suppliers")}
-                            <input type="hidden" name="id" value={item.id} />
-                            <button type="submit" className="text-button">Delete</button>
-                          </form>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </article>
-
-            <article className="panel">
-              <div className="panel-head"><div><p className="section-kicker">{editingSupplier ? "Edit Supplier" : "New Supplier"}</p><h2>{editingSupplier ? editingSupplier.name : "Create supplier"}</h2></div></div>
-              <form action={editingSupplier ? updateSupplierAction : createSupplierAction} className="form-grid">
-                {hiddenReturn("/settings?tab=suppliers")}
-                {editingSupplier ? <input type="hidden" name="id" value={editingSupplier.id} /> : null}
-                <input name="name" placeholder="Name" defaultValue={editingSupplier?.name} required />
-                <input name="material" placeholder="Material" defaultValue={editingSupplier?.material} required />
-                <input name="rating" type="number" step="0.1" placeholder="Rating" defaultValue={editingSupplier?.rating} required />
-                <input name="leadTimeDays" type="number" placeholder="Lead time days" defaultValue={editingSupplier?.leadTimeDays} required />
-                <select name="status" defaultValue={editingSupplier?.status || "Approved"} required>
-                  {["Approved", "Review"].map((status) => <option key={status} value={status}>{status}</option>)}
-                </select>
-                <input name="email" type="email" placeholder="Email" defaultValue={editingSupplier?.email} required />
-                <input name="phone" placeholder="Phone" defaultValue={editingSupplier?.phone} required />
-                <button type="submit" className="toolbar-button primary-button">{editingSupplier ? "Update supplier" : "Create supplier"}</button>
-              </form>
-            </article>
-          </section>
-        ) : (
-          <AccessDenied message="Only administrators can manage supplier master data." />
-        )
-      ) : (
+      {tab === "system" ? (
         <section className="panel-grid two-up">
           <article className="panel span-two">
             <div className="panel-head"><div><p className="section-kicker">Regional</p><h2>Region, currency and branding</h2></div></div>
@@ -794,7 +874,7 @@ export function SettingsModule({ data, user, params }: { data: DashboardData; us
             )}
           </article>
         </section>
-      )}
+      ) : null}
     </>
   );
 }

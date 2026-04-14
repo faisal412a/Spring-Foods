@@ -15,6 +15,7 @@ import {
   createProduct,
   createProductionTransaction,
   createPurchaseOrder,
+  createRawMaterial,
   createSalesOrder,
   createStockMovement,
   createSupplier,
@@ -22,6 +23,7 @@ import {
   deletePurchaseOrder,
   deleteProductionTransaction,
   deleteProduct,
+  deleteRawMaterial,
   deleteSalesOrder,
   deleteSupplier,
   resetDatabaseToSeed,
@@ -30,6 +32,7 @@ import {
   updatePurchaseOrder,
   updateProductionTransaction,
   updateProduct,
+  updateRawMaterial,
   updateSalesOrder,
   updateSupplier,
   updateUserPassword
@@ -142,6 +145,63 @@ export async function deleteProductAction(formData: FormData) {
   }
 }
 
+export async function createRawMaterialAction(formData: FormData) {
+  const returnTo = getReturnTo(formData, "/raw-materials");
+  try {
+    const user = await requireLoggedInUser();
+    if (!canManageMasterData(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to create raw materials.");
+    await createRawMaterial({
+      code: requiredText(formData, "code"),
+      name: requiredText(formData, "name"),
+      category: requiredText(formData, "category"),
+      unit: requiredText(formData, "unit"),
+      reorderLevel: requiredNumber(formData, "reorderLevel"),
+      userId: user.id
+    });
+    revalidateCommon("/raw-materials");
+    revalidatePath("/purchases");
+    finishWithMessage(returnTo, "success", "Raw material created");
+  } catch (error) {
+    finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to create raw material.");
+  }
+}
+
+export async function updateRawMaterialAction(formData: FormData) {
+  const returnTo = getReturnTo(formData, "/raw-materials");
+  try {
+    const user = await requireLoggedInUser();
+    if (!canManageMasterData(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to update raw materials.");
+    await updateRawMaterial({
+      id: requiredNumber(formData, "id"),
+      code: requiredText(formData, "code"),
+      name: requiredText(formData, "name"),
+      category: requiredText(formData, "category"),
+      unit: requiredText(formData, "unit"),
+      reorderLevel: requiredNumber(formData, "reorderLevel"),
+      userId: user.id
+    });
+    revalidateCommon("/raw-materials");
+    revalidatePath("/purchases");
+    finishWithMessage(returnTo, "success", "Raw material updated");
+  } catch (error) {
+    finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to update raw material.");
+  }
+}
+
+export async function deleteRawMaterialAction(formData: FormData) {
+  const returnTo = getReturnTo(formData, "/raw-materials");
+  try {
+    const user = await requireLoggedInUser();
+    if (!canManageMasterData(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to delete raw materials.");
+    await deleteRawMaterial(requiredNumber(formData, "id"), user.id);
+    revalidateCommon("/raw-materials");
+    revalidatePath("/purchases");
+    finishWithMessage("/raw-materials", "success", "Raw material deleted");
+  } catch (error) {
+    finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to delete raw material.");
+  }
+}
+
 export async function createCustomerAction(formData: FormData) {
   const returnTo = getReturnTo(formData, "/customers");
   try {
@@ -199,7 +259,7 @@ export async function deleteCustomerAction(formData: FormData) {
 }
 
 export async function createSupplierAction(formData: FormData) {
-  const returnTo = getReturnTo(formData, "/settings?tab=suppliers");
+  const returnTo = getReturnTo(formData, "/suppliers");
   try {
     const user = await requireLoggedInUser();
     if (!canManageMasterData(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to create suppliers.");
@@ -213,7 +273,8 @@ export async function createSupplierAction(formData: FormData) {
       phone: requiredText(formData, "phone"),
       userId: user.id
     });
-    revalidateCommon("/settings");
+    revalidateCommon("/suppliers");
+    revalidatePath("/purchases");
     finishWithMessage(returnTo, "success", "Supplier created");
   } catch (error) {
     finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to create supplier.");
@@ -221,7 +282,7 @@ export async function createSupplierAction(formData: FormData) {
 }
 
 export async function updateSupplierAction(formData: FormData) {
-  const returnTo = getReturnTo(formData, "/settings?tab=suppliers");
+  const returnTo = getReturnTo(formData, "/suppliers");
   try {
     const user = await requireLoggedInUser();
     if (!canManageMasterData(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to update suppliers.");
@@ -236,7 +297,8 @@ export async function updateSupplierAction(formData: FormData) {
       phone: requiredText(formData, "phone"),
       userId: user.id
     });
-    revalidateCommon("/settings");
+    revalidateCommon("/suppliers");
+    revalidatePath("/purchases");
     finishWithMessage(returnTo, "success", "Supplier updated");
   } catch (error) {
     finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to update supplier.");
@@ -244,13 +306,14 @@ export async function updateSupplierAction(formData: FormData) {
 }
 
 export async function deleteSupplierAction(formData: FormData) {
-  const returnTo = getReturnTo(formData, "/settings?tab=suppliers");
+  const returnTo = getReturnTo(formData, "/suppliers");
   try {
     const user = await requireLoggedInUser();
     if (!canManageMasterData(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to delete suppliers.");
     await deleteSupplier(requiredNumber(formData, "id"), user.id);
-    revalidateCommon("/settings");
-    finishWithMessage("/settings?tab=suppliers", "success", "Supplier deleted");
+    revalidateCommon("/suppliers");
+    revalidatePath("/purchases");
+    finishWithMessage("/suppliers", "success", "Supplier deleted");
   } catch (error) {
     finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to delete supplier.");
   }
@@ -329,7 +392,7 @@ export async function createPurchaseOrderAction(formData: FormData) {
     await createPurchaseOrder({
       poNo: requiredText(formData, "poNo"),
       supplierId: requiredNumber(formData, "supplierId"),
-      material: requiredText(formData, "material"),
+      rawMaterialId: requiredNumber(formData, "rawMaterialId"),
       status: requiredText(formData, "status"),
       expectedDate: requiredText(formData, "expectedDate"),
       quantityCases: requiredNumber(formData, "quantityCases"),
@@ -353,7 +416,7 @@ export async function updatePurchaseOrderAction(formData: FormData) {
       id: requiredNumber(formData, "id"),
       poNo: requiredText(formData, "poNo"),
       supplierId: requiredNumber(formData, "supplierId"),
-      material: requiredText(formData, "material"),
+      rawMaterialId: requiredNumber(formData, "rawMaterialId"),
       status: requiredText(formData, "status"),
       expectedDate: requiredText(formData, "expectedDate"),
       quantityCases: requiredNumber(formData, "quantityCases"),
