@@ -9,6 +9,7 @@ import {
   seedCustomers,
   seedProductionTransactions,
   seedProducts,
+  seedRawMaterials,
   seedPurchaseOrders,
   seedSalesOrders,
   seedStockMovements,
@@ -150,6 +151,14 @@ async function seedDatabase(pool: Pool) {
     );
   }
 
+  for (const rawMaterial of seedRawMaterials) {
+    await pool.query(
+      `INSERT INTO raw_materials (code, name, category, unit, reorder_level)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [rawMaterial.code, rawMaterial.name, rawMaterial.category, rawMaterial.unit, rawMaterial.reorderLevel]
+    );
+  }
+
   await ensureSystemSettings(pool);
   await initializeCounters(pool);
 
@@ -158,6 +167,7 @@ async function seedDatabase(pool: Pool) {
   const products = await pool.query("SELECT id, code, name, unit_price FROM products");
   const customers = await pool.query("SELECT id, name, city FROM customers");
   const suppliers = await pool.query("SELECT id, name FROM suppliers");
+  const rawMaterials = await pool.query("SELECT id, name FROM raw_materials");
 
   for (const movement of seedStockMovements) {
     const product = products.rows.find((row) => row.code === movement.productCode);
@@ -205,14 +215,15 @@ async function seedDatabase(pool: Pool) {
 
   for (const po of seedPurchaseOrders) {
     const supplier = suppliers.rows.find((row) => row.name === po.supplier);
+    const rawMaterial = rawMaterials.rows.find((row) => row.name === po.material);
     if (!supplier) {
       continue;
     }
 
     await pool.query(
-      `INSERT INTO purchase_orders (po_no, supplier_id, material, status, expected_date, quantity_cases, cost, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [po.poNo, supplier.id, po.material, po.status, po.expectedDate, po.quantityCases, po.cost, adminId]
+      `INSERT INTO purchase_orders (po_no, supplier_id, raw_material_id, material, status, expected_date, quantity_cases, cost, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [po.poNo, supplier.id, rawMaterial?.id ?? null, po.material, po.status, po.expectedDate, po.quantityCases, po.cost, adminId]
     );
   }
 
@@ -296,6 +307,16 @@ export async function ensureDatabase() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS raw_materials (
+          id SERIAL PRIMARY KEY,
+          code TEXT UNIQUE NOT NULL,
+          name TEXT UNIQUE NOT NULL,
+          category TEXT NOT NULL,
+          unit TEXT NOT NULL,
+          reorder_level INTEGER NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         CREATE TABLE IF NOT EXISTS sales_orders (
           id SERIAL PRIMARY KEY,
           order_no TEXT UNIQUE NOT NULL,
@@ -321,6 +342,7 @@ export async function ensureDatabase() {
           id SERIAL PRIMARY KEY,
           po_no TEXT UNIQUE NOT NULL,
           supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+          raw_material_id INTEGER REFERENCES raw_materials(id),
           material TEXT NOT NULL,
           status TEXT NOT NULL,
           expected_date DATE NOT NULL,
@@ -388,6 +410,7 @@ export async function ensureDatabase() {
       `);
 
       await pool.query(`ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS invoice_no TEXT NOT NULL DEFAULT ''`);
+      await pool.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS raw_material_id INTEGER REFERENCES raw_materials(id)`);
       await initializeCounters(pool);
       await ensureSystemSettings(pool);
 
@@ -401,6 +424,14 @@ export async function ensureDatabase() {
       }
 
       await seedDatabase(pool);
+
+      await pool.query(
+        `UPDATE purchase_orders po
+         SET raw_material_id = rm.id
+         FROM raw_materials rm
+         WHERE po.raw_material_id IS NULL
+           AND LOWER(po.material) = LOWER(rm.name)`
+      );
     })();
   }
 
@@ -529,10 +560,19 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
   const pool = getPool();
   const settings = await getSystemSettings();
 
-  const [users, products, customers, suppliers, salesOrders, purchaseOrders, productionTransactions, stockMovements, inventory, auditLogs] =
+  const [users, products, rawMaterials, customers, suppliers, salesOrders, purchaseOrders, productionTransactions, stockMovements, inventory, auditLogs] =
     await Promise.all([
       pool.query("SELECT id, username, display_name, role FROM users ORDER BY id"),
       pool.query("SELECT id, code, name, category, unit_price, storage, shelf_life_days, reorder_level_cases FROM products ORDER BY name"),
+      pool.query(
+        `SELECT rm.id, rm.code, rm.name, rm.category, rm.unit, rm.reorder_level,
+                COALESCE(SUM(po.quantity_cases), 0) AS total_purchased_qty,
+                COALESCE(MAX(po.quantity_cases), 0) AS last_purchase_qty
+         FROM raw_materials rm
+         LEFT JOIN purchase_orders po ON po.raw_material_id = rm.id
+         GROUP BY rm.id, rm.code, rm.name, rm.category, rm.unit, rm.reorder_level
+         ORDER BY rm.name`
+      ),
       pool.query("SELECT id, name, segment, city, email, phone, receivable FROM customers ORDER BY name"),
       pool.query("SELECT id, name, material, rating, lead_time_days, status, email, phone FROM suppliers ORDER BY name"),
       pool.query(
@@ -545,7 +585,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
          ORDER BY so.created_at DESC`
       ),
       pool.query(
-        `SELECT po.id, po.po_no, po.supplier_id, s.name AS supplier, po.material, po.status, po.expected_date, po.quantity_cases, po.cost, po.created_at
+        `SELECT po.id, po.po_no, po.supplier_id, po.raw_material_id, s.name AS supplier, po.material, po.status, po.expected_date, po.quantity_cases, po.cost, po.created_at
          FROM purchase_orders po
          JOIN suppliers s ON s.id = po.supplier_id
          ORDER BY po.created_at DESC`
@@ -604,6 +644,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     id: row.id,
     poNo: row.po_no,
     supplierId: row.supplier_id,
+    rawMaterialId: row.raw_material_id,
     supplier: row.supplier,
     material: row.material,
     status: row.status,
@@ -686,6 +727,16 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
       shelfLifeDays: row.shelf_life_days,
       reorderLevelCases: row.reorder_level_cases
     })),
+    rawMaterials: rawMaterials.rows.map((row) => ({
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      category: row.category,
+      unit: row.unit,
+      reorderLevel: row.reorder_level,
+      lastPurchaseQty: Number(row.last_purchase_qty),
+      totalPurchasedQty: Number(row.total_purchased_qty)
+    })),
     customers: customers.rows.map((row) => ({
       id: row.id,
       name: row.name,
@@ -738,6 +789,7 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
   const purchaseOrders = seedPurchaseOrders.map((row, index) => ({
     id: index + 1,
     supplierId: index + 1,
+    rawMaterialId: seedRawMaterials.findIndex((material) => material.name === row.material) + 1 || null,
     ...row,
     createdAt: new Date().toISOString()
   }));
@@ -770,6 +822,16 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
     settings: defaultSystemSettings,
     users: defaultUsers.map((user, index) => ({ id: index + 1, username: user.username, displayName: user.displayName, role: user.role })),
     products: seedProducts.map((row, index) => ({ id: index + 1, ...row })),
+    rawMaterials: seedRawMaterials.map((row, index) => ({
+      id: index + 1,
+      code: row.code,
+      name: row.name,
+      category: row.category,
+      unit: row.unit,
+      reorderLevel: row.reorderLevel,
+      lastPurchaseQty: seedPurchaseOrders.find((po) => po.material === row.name)?.quantityCases ?? 0,
+      totalPurchasedQty: seedPurchaseOrders.filter((po) => po.material === row.name).reduce((sum, po) => sum + po.quantityCases, 0)
+    })),
     customers: seedCustomers.map((row, index) => ({ id: index + 1, ...row })),
     suppliers: seedSuppliers.map((row, index) => ({ id: index + 1, ...row })),
     salesOrders,
@@ -874,6 +936,42 @@ export async function deleteProduct(id: number, userId: number | null) {
   await pool.query("DELETE FROM stock_movements WHERE product_id = $1", [id]);
   await pool.query("DELETE FROM products WHERE id = $1", [id]);
   await recordAudit(pool, userId, "delete", "product", label.rows[0]?.name ?? `Product ${id}`, "Deleted product and related stock references.");
+}
+
+export async function createRawMaterial(input: { code: string; name: string; category: string; unit: string; reorderLevel: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO raw_materials (code, name, category, unit, reorder_level)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [input.code, input.name, input.category, input.unit, input.reorderLevel]
+  );
+  await recordAudit(pool, input.userId, "create", "raw-material", input.name, `Created raw material ${input.code}.`);
+}
+
+export async function updateRawMaterial(input: { id: number; code: string; name: string; category: string; unit: string; reorderLevel: number; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `UPDATE raw_materials
+     SET code = $2, name = $3, category = $4, unit = $5, reorder_level = $6
+     WHERE id = $1`,
+    [input.id, input.code, input.name, input.category, input.unit, input.reorderLevel]
+  );
+  await pool.query(`UPDATE purchase_orders SET material = $2 WHERE raw_material_id = $1`, [input.id, input.name]);
+  await recordAudit(pool, input.userId, "update", "raw-material", input.name, "Updated raw material master data.");
+}
+
+export async function deleteRawMaterial(id: number, userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const label = await pool.query("SELECT name FROM raw_materials WHERE id = $1", [id]);
+  await pool.query("UPDATE purchase_orders SET raw_material_id = NULL WHERE raw_material_id = $1", [id]);
+  await pool.query("DELETE FROM raw_materials WHERE id = $1", [id]);
+  await recordAudit(pool, userId, "delete", "raw-material", label.rows[0]?.name ?? `Raw Material ${id}`, "Deleted raw material master data.");
 }
 
 export async function createCustomer(input: { name: string; segment: string; city: string; email: string; phone: string; receivable: number; userId: number | null }) {
@@ -1046,27 +1144,29 @@ export async function deleteSalesOrder(id: number, userId: number | null) {
   await recordAudit(pool, userId, "delete", "sales-order", label.rows[0]?.order_no ?? `Order ${id}`, "Deleted sales order and removed related inventory issue.");
 }
 
-export async function createPurchaseOrder(input: { poNo: string; supplierId: number; material: string; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
+export async function createPurchaseOrder(input: { poNo: string; supplierId: number; rawMaterialId: number; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
+  const rawMaterial = await pool.query("SELECT name FROM raw_materials WHERE id = $1", [input.rawMaterialId]);
   await pool.query(
-    `INSERT INTO purchase_orders (po_no, supplier_id, material, status, expected_date, quantity_cases, cost, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [input.poNo, input.supplierId, input.material, input.status, input.expectedDate, input.quantityCases, input.cost, input.userId]
+    `INSERT INTO purchase_orders (po_no, supplier_id, raw_material_id, material, status, expected_date, quantity_cases, cost, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [input.poNo, input.supplierId, input.rawMaterialId, rawMaterial.rows[0]?.name ?? "", input.status, input.expectedDate, input.quantityCases, input.cost, input.userId]
   );
   await recordAudit(pool, input.userId, "create", "purchase-order", input.poNo, "Created raw material purchase order.");
 }
 
-export async function updatePurchaseOrder(input: { id: number; poNo: string; supplierId: number; material: string; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
+export async function updatePurchaseOrder(input: { id: number; poNo: string; supplierId: number; rawMaterialId: number; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
+  const rawMaterial = await pool.query("SELECT name FROM raw_materials WHERE id = $1", [input.rawMaterialId]);
   await pool.query(
     `UPDATE purchase_orders
-     SET po_no = $2, supplier_id = $3, material = $4, status = $5, expected_date = $6, quantity_cases = $7, cost = $8
+     SET po_no = $2, supplier_id = $3, raw_material_id = $4, material = $5, status = $6, expected_date = $7, quantity_cases = $8, cost = $9
      WHERE id = $1`,
-    [input.id, input.poNo, input.supplierId, input.material, input.status, input.expectedDate, input.quantityCases, input.cost]
+    [input.id, input.poNo, input.supplierId, input.rawMaterialId, rawMaterial.rows[0]?.name ?? "", input.status, input.expectedDate, input.quantityCases, input.cost]
   );
   await recordAudit(pool, input.userId, "update", "purchase-order", input.poNo, "Updated raw material purchase order.");
 }
@@ -1158,7 +1258,7 @@ export async function resetDatabaseToSeed(userId: number | null) {
   await ensureDatabase();
   const pool = getPool();
 
-  await pool.query("TRUNCATE TABLE audit_logs, stock_movements, production_transactions, purchase_orders, sales_order_items, sales_orders, suppliers, customers, products, users, document_counters RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE TABLE audit_logs, stock_movements, production_transactions, purchase_orders, sales_order_items, sales_orders, raw_materials, suppliers, customers, products, users, document_counters, system_settings RESTART IDENTITY CASCADE");
   await seedDatabase(pool);
   await recordAudit(pool, userId, "reset", "system", "Database Reset", "Cleared all records and reloaded demo seed data.");
 }
@@ -1167,10 +1267,11 @@ export async function exportBackupData() {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
-  const [users, products, customers, suppliers, salesOrders, salesOrderItems, purchaseOrders, productionTransactions, stockMovements, auditLogs, counters, settings] =
+  const [users, products, rawMaterials, customers, suppliers, salesOrders, salesOrderItems, purchaseOrders, productionTransactions, stockMovements, auditLogs, counters, settings] =
     await Promise.all([
       pool.query("SELECT id, username, display_name, role, created_at FROM users ORDER BY id"),
       pool.query("SELECT * FROM products ORDER BY id"),
+      pool.query("SELECT * FROM raw_materials ORDER BY id"),
       pool.query("SELECT * FROM customers ORDER BY id"),
       pool.query("SELECT * FROM suppliers ORDER BY id"),
       pool.query("SELECT * FROM sales_orders ORDER BY id"),
@@ -1189,6 +1290,7 @@ export async function exportBackupData() {
     tables: {
       users: users.rows,
       products: products.rows,
+      rawMaterials: rawMaterials.rows,
       customers: customers.rows,
       suppliers: suppliers.rows,
       salesOrders: salesOrders.rows,

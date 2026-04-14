@@ -18,6 +18,7 @@ export function getNavItems(user: SessionUser) {
 
   if (canManageMasterData(user.role)) {
     items.push({ href: "/products", label: "Finished Products" });
+    items.push({ href: "/raw-materials", label: "Raw Materials" });
   }
 
   if (canManageStock(user.role) || canManageMasterData(user.role)) {
@@ -26,6 +27,10 @@ export function getNavItems(user: SessionUser) {
 
   if (canManageMasterData(user.role) || canManageOrders(user.role)) {
     items.push({ href: "/customers", label: "Customers" });
+  }
+
+  if (canManageMasterData(user.role) || canManagePurchases(user.role)) {
+    items.push({ href: "/suppliers", label: "Suppliers" });
   }
 
   if (canManageOrders(user.role)) {

@@ -18,6 +18,17 @@ export type ProductRecord = {
   reorderLevelCases: number;
 };
 
+export type RawMaterialRecord = {
+  id: number;
+  code: string;
+  name: string;
+  category: string;
+  unit: string;
+  reorderLevel: number;
+  lastPurchaseQty: number;
+  totalPurchasedQty: number;
+};
+
 export type CustomerRecord = {
   id: number;
   name: string;
@@ -60,6 +71,7 @@ export type PurchaseOrderRecord = {
   id: number;
   poNo: string;
   supplierId: number;
+  rawMaterialId: number | null;
   supplier: string;
   material: string;
   status: "Draft" | "Sent" | "Confirmed" | "Received";
@@ -148,6 +160,7 @@ export type DashboardData = {
   settings: SystemSettings;
   users: SessionUser[];
   products: ProductRecord[];
+  rawMaterials: RawMaterialRecord[];
   customers: CustomerRecord[];
   suppliers: SupplierRecord[];
   salesOrders: SalesOrderRecord[];
@@ -216,6 +229,13 @@ export const seedProducts = [
   { code: "FF-104", name: "Beef Burger Patties 1kg", category: "Finished Products", unitPrice: 33, storage: "-20C", shelfLifeDays: 240, reorderLevelCases: 160 }
 ];
 
+export const seedRawMaterials = [
+  { code: "RM-101", name: "Chicken Breast", category: "Protein", unit: "kg", reorderLevel: 500 },
+  { code: "RM-102", name: "Mixed Vegetables", category: "Vegetables", unit: "kg", reorderLevel: 350 },
+  { code: "RM-103", name: "French Fries Potato", category: "Vegetables", unit: "kg", reorderLevel: 600 },
+  { code: "RM-104", name: "Carton Packaging", category: "Packaging", unit: "pcs", reorderLevel: 1000 }
+] as const;
+
 export const seedCustomers = [
   { name: "Arctic Mart", segment: "Retail Chain", city: "Riyadh", email: "orders@arcticmart.example", phone: "+966500001001", receivable: 18400 },
   { name: "Fresh Basket", segment: "Supermarket", city: "Jeddah", email: "buying@freshbasket.example", phone: "+966500001002", receivable: 9200 },
@@ -235,8 +255,8 @@ export const seedSalesOrders = [
 ];
 
 export const seedPurchaseOrders = [
-  { poNo: "PO-9001", supplier: "Nordic Poultry Co.", material: "Chicken", status: "Confirmed" as const, expectedDate: "2026-04-16", quantityCases: 640, cost: 15200 },
-  { poNo: "PO-9002", supplier: "GreenFarm IQF", material: "Vegetables", status: "Sent" as const, expectedDate: "2026-04-18", quantityCases: 500, cost: 9700 }
+  { poNo: "PO-9001", supplier: "Nordic Poultry Co.", material: "Chicken Breast", status: "Confirmed" as const, expectedDate: "2026-04-16", quantityCases: 640, cost: 15200 },
+  { poNo: "PO-9002", supplier: "GreenFarm IQF", material: "Mixed Vegetables", status: "Sent" as const, expectedDate: "2026-04-18", quantityCases: 500, cost: 9700 }
 ];
 
 export const seedProductionTransactions = [
