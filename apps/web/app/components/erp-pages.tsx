@@ -8,6 +8,7 @@ import {
   createRawMaterialAction,
   createSalesOrderAction,
   createSupplierAction,
+  createUserAction,
   deleteCustomerAction,
   deleteProductAction,
   deleteProductionTransactionAction,
@@ -15,7 +16,9 @@ import {
   deleteSalesOrderAction,
   deleteSupplierAction,
   deleteRawMaterialAction,
+  deleteUserAction,
   resetDataAction,
+  recordCustomerPaymentAction,
   saveSettingsAction,
   updateCustomerAction,
   updateProductAction,
@@ -23,7 +26,8 @@ import {
   updatePurchaseOrderAction,
   updateRawMaterialAction,
   updateSalesOrderAction,
-  updateSupplierAction
+  updateSupplierAction,
+  updateUserRoleAction
 } from "../actions";
 import {
   DashboardData,
@@ -449,8 +453,8 @@ export function CustomersModule({ data, user, params }: { data: DashboardData; u
             <input name="name" placeholder="Name" defaultValue={editingCustomer?.name} required />
             <input name="segment" placeholder="Segment" defaultValue={editingCustomer?.segment} required />
             <input name="city" placeholder="City" defaultValue={editingCustomer?.city} required />
-            <input name="email" type="email" placeholder="Email" defaultValue={editingCustomer?.email} required />
-            <input name="phone" placeholder="Phone" defaultValue={editingCustomer?.phone} required />
+            <input name="email" type="email" placeholder="Email (optional)" defaultValue={editingCustomer?.email} />
+            <input name="phone" placeholder="Phone (optional)" defaultValue={editingCustomer?.phone} />
             <input name="receivable" type="number" step="0.01" placeholder="Receivable" defaultValue={editingCustomer?.receivable} required />
             <button type="submit" className="toolbar-button primary-button">{editingCustomer ? "Update customer" : "Create customer"}</button>
           </form>
@@ -516,8 +520,8 @@ export function SuppliersModule({ data, user, params }: { data: DashboardData; u
             <select name="status" defaultValue={editingSupplier?.status || "Approved"} required>
               {["Approved", "Review"].map((status) => <option key={status} value={status}>{status}</option>)}
             </select>
-            <input name="email" type="email" placeholder="Email" defaultValue={editingSupplier?.email} required />
-            <input name="phone" placeholder="Phone" defaultValue={editingSupplier?.phone} required />
+            <input name="email" type="email" placeholder="Email (optional)" defaultValue={editingSupplier?.email} />
+            <input name="phone" placeholder="Phone (optional)" defaultValue={editingSupplier?.phone} />
             <button type="submit" className="toolbar-button primary-button">{editingSupplier ? "Update supplier" : "Create supplier"}</button>
           </form>
         ) : (
@@ -545,17 +549,18 @@ export function OrdersModule({ data, user, params }: { data: DashboardData; user
         </div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Order</th><th>Invoice</th><th>Customer</th><th>Product</th><th>Qty</th><th>Status</th><th>Amount</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Order</th><th>Invoice</th><th>Customer</th><th>Batch</th><th>Qty</th><th>Dispatch</th><th>Payment</th><th>Balance</th><th>Actions</th></tr></thead>
             <tbody>
               {data.salesOrders.map((item) => (
                 <tr key={item.id}>
                   <td>{item.orderNo}</td>
                   <td>{item.invoiceNo}</td>
                   <td>{item.customer}</td>
-                  <td>{item.productName}</td>
+                  <td>{item.batchCode || "-"}</td>
                   <td>{item.quantityCases}</td>
                   <td>{item.status}</td>
-                  <td>{formatCurrency(item.amount, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{item.paymentStatus}</td>
+                  <td>{formatCurrency(item.balanceDue, data.settings.currencyCode, data.settings.locale)}</td>
                   <td className="action-cell">
                     <Link href={`/orders?orderId=${item.id}`} className="text-link">Edit</Link>
                     <Link href={`/invoices/${item.id}`} className="text-link">Print invoice</Link>
@@ -588,9 +593,17 @@ export function OrdersModule({ data, user, params }: { data: DashboardData; user
             <option value="">Select customer</option>
             {data.customers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
-          <select name="productId" defaultValue={editingOrder?.productId || ""} required>
-            <option value="">Select product</option>
-            {data.products.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          <select
+            name="batchSelection"
+            defaultValue={editingOrder ? `${editingOrder.productId}|${editingOrder.batchCode}|${editingOrder.zone}` : ""}
+            required
+          >
+            <option value="">Select product batch</option>
+            {data.availableBatches.map((item) => (
+              <option key={`${item.productId}-${item.batchCode}-${item.zone}`} value={`${item.productId}|${item.batchCode}|${item.zone}`}>
+                {item.productName} · {item.batchCode} · {item.availableCases} cases
+              </option>
+            ))}
           </select>
           <input name="quantityCases" type="number" placeholder="Quantity cases" defaultValue={editingOrder?.quantityCases} required />
           <input name="unitPrice" type="number" step="0.01" placeholder="Unit price" defaultValue={editingOrder?.unitPrice} required />
@@ -598,8 +611,6 @@ export function OrdersModule({ data, user, params }: { data: DashboardData; user
             {["Draft", "Confirmed", "Packed", "In Transit", "Delivered"].map((status) => <option key={status} value={status}>{status}</option>)}
           </select>
           <input name="deliveryDate" type="date" defaultValue={editingOrder?.deliveryDate} required />
-          <input name="zone" placeholder="Dispatch zone" defaultValue="Dispatch Bay" required />
-          <input name="batchCode" placeholder="Batch code" defaultValue={editingOrder ? `${editingOrder.orderNo}-ALLOC` : ""} required />
           <button type="submit" className="toolbar-button primary-button">{editingOrder ? "Update order" : "Create order"}</button>
         </form>
       </article>
@@ -651,8 +662,13 @@ export function PurchasesModule({ data, user, params }: { data: DashboardData; u
         <div className="panel-head"><div><p className="section-kicker">{editingPurchase ? "Edit PO" : "New PO"}</p><h2>{editingPurchase ? editingPurchase.poNo : "Create purchase order"}</h2></div></div>
         <form action={editingPurchase ? updatePurchaseOrderAction : createPurchaseOrderAction} className="form-grid">
           {hiddenReturn("/purchases")}
-          {editingPurchase ? <input type="hidden" name="id" value={editingPurchase.id} /> : null}
-          <input name="poNo" placeholder="PO number" defaultValue={editingPurchase?.poNo} required />
+          {editingPurchase ? (
+            <>
+              <input type="hidden" name="id" value={editingPurchase.id} />
+              <input type="hidden" name="poNo" value={editingPurchase.poNo} />
+            </>
+          ) : null}
+          {!editingPurchase ? <div className="inline-note">PO number is assigned automatically when the purchase order is saved.</div> : null}
           <select name="supplierId" defaultValue={editingPurchase?.supplierId || ""} required>
             <option value="">Select supplier</option>
             {data.suppliers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
@@ -723,7 +739,7 @@ export function ProductionModule({ data, user, params }: { data: DashboardData; 
               <input type="hidden" name="previousBatchNo" value={editingProduction.batchNo} />
             </>
           ) : null}
-          <input name="batchNo" placeholder="Batch number" defaultValue={editingProduction?.batchNo} required />
+          {editingProduction ? <input name="batchNo" placeholder="Batch number" defaultValue={editingProduction.batchNo} required /> : <div className="inline-note">Batch number is assigned automatically when production is recorded.</div>}
           <select name="productId" defaultValue={editingProduction?.productId || ""} required>
             <option value="">Select product</option>
             {data.products.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
@@ -749,23 +765,42 @@ export function FinanceModule({ data, user }: { data: DashboardData; user: Sessi
   return (
     <section className="panel-grid two-up">
       <article className="panel">
-        <div className="panel-head"><div><p className="section-kicker">Invoices</p><h2>Recent invoice totals</h2></div></div>
+        <div className="panel-head"><div><p className="section-kicker">Invoices</p><h2>Receivables and payment status</h2></div></div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Status</th><th>Print</th></tr></thead>
+            <thead><tr><th>Invoice</th><th>Customer</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th><th>Print</th></tr></thead>
             <tbody>
               {data.salesOrders.map((item) => (
                 <tr key={item.id}>
                   <td>{item.invoiceNo}</td>
                   <td>{item.customer}</td>
                   <td>{formatCurrency(item.amount, data.settings.currencyCode, data.settings.locale)}</td>
-                  <td>{item.status}</td>
+                  <td>{formatCurrency(item.amountPaid, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{formatCurrency(item.balanceDue, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{item.paymentStatus}</td>
                   <td><Link href={`/invoices/${item.id}`} className="text-link">Open</Link></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+      </article>
+
+      <article className="panel">
+        <div className="panel-head"><div><p className="section-kicker">Payments</p><h2>Record customer payment</h2></div></div>
+        <form action={recordCustomerPaymentAction} className="form-grid">
+          {hiddenReturn("/finance")}
+          <select name="salesOrderId" required>
+            <option value="">Select invoice</option>
+            {data.salesOrders.filter((item) => item.balanceDue > 0).map((item) => (
+              <option key={item.id} value={item.id}>{item.invoiceNo} · {item.customer} · {formatCurrency(item.balanceDue, data.settings.currencyCode, data.settings.locale)} due</option>
+            ))}
+          </select>
+          <input name="amountReceived" type="number" step="0.01" placeholder="Amount received" required />
+          <input name="paymentDate" type="date" required />
+          <input name="note" placeholder="Note (optional)" />
+          <button type="submit" className="toolbar-button primary-button">Record payment</button>
+        </form>
       </article>
 
       <article className="panel">
@@ -777,6 +812,18 @@ export function FinanceModule({ data, user }: { data: DashboardData; user: Sessi
               <strong>{formatCurrency(item.cost, data.settings.currencyCode, data.settings.locale)}</strong>
             </div>
           ))}
+        </div>
+      </article>
+
+      <article className="panel">
+        <div className="panel-head"><div><p className="section-kicker">Recent Payments</p><h2>Latest customer receipts</h2></div></div>
+        <div className="finance-list">
+          {data.customerPayments.length ? data.customerPayments.slice(0, 6).map((item) => (
+            <div key={item.id}>
+              <span>{item.invoiceNo} · {item.customer}</span>
+              <strong>{formatCurrency(item.amountReceived, data.settings.currencyCode, data.settings.locale)}</strong>
+            </div>
+          )) : <p>No payments recorded yet.</p>}
         </div>
       </article>
     </section>
@@ -876,6 +923,62 @@ export function SettingsModule({ data, user, params }: { data: DashboardData; us
         </section>
       ) : null}
     </>
+  );
+}
+
+export function UsersModule({ data, user, params }: { data: DashboardData; user: SessionUser; params: SearchMap }) {
+  if (user.role !== "admin") {
+    return <AccessDenied message="Only admin can manage users and access roles." />;
+  }
+
+  const editId = Number(readParam(params.userId)) || 0;
+  const editingUser = data.users.find((item) => item.id === editId);
+
+  return (
+    <section className="module-grid">
+      <article className="panel span-two">
+        <div className="panel-head"><div><p className="section-kicker">Users</p><h2>User accounts and access</h2></div></div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Username</th><th>Name</th><th>Role</th><th>Actions</th></tr></thead>
+            <tbody>
+              {data.users.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.username}</td>
+                  <td>{item.displayName}</td>
+                  <td>{item.role}</td>
+                  <td className="action-cell">
+                    <Link href={`/users?userId=${item.id}`} className="text-link">Edit</Link>
+                    {item.id !== user.id ? (
+                      <form action={deleteUserAction}>
+                        {hiddenReturn("/users")}
+                        <input type="hidden" name="id" value={item.id} />
+                        <button type="submit" className="text-button">Delete</button>
+                      </form>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </article>
+
+      <article className="panel">
+        <div className="panel-head"><div><p className="section-kicker">{editingUser ? "Edit User" : "New User"}</p><h2>{editingUser ? editingUser.username : "Create user"}</h2></div></div>
+        <form action={editingUser ? updateUserRoleAction : createUserAction} className="form-grid">
+          {hiddenReturn("/users")}
+          {editingUser ? <input type="hidden" name="id" value={editingUser.id} /> : null}
+          {!editingUser ? <input name="username" placeholder="Username" required /> : <input name="displayName" placeholder="Display name" defaultValue={editingUser.displayName} required />}
+          {!editingUser ? <input name="displayName" placeholder="Display name" required /> : null}
+          <select name="role" defaultValue={editingUser?.role || "sales"} required>
+            {["admin", "sales", "warehouse", "accountant"].map((role) => <option key={role} value={role}>{role}</option>)}
+          </select>
+          {!editingUser ? <input name="password" type="password" placeholder="Temporary password" minLength={6} required /> : null}
+          <button type="submit" className="toolbar-button primary-button">{editingUser ? "Update access" : "Create user"}</button>
+        </form>
+      </article>
+    </section>
   );
 }
 

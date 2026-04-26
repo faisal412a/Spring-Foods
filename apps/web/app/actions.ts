@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { authenticateUser, clearSession, getSessionUser, setSession } from "../lib/auth";
 import {
+  SessionUser,
   canManageMasterData,
   canManageOrders,
   canManageProduction,
@@ -27,11 +28,15 @@ import {
   deleteSalesOrder,
   deleteSupplier,
   clearOperationalData,
+  createUser,
   updateSystemSettings,
+  deleteUser,
+  recordCustomerPayment,
   updateCustomer,
   updatePurchaseOrder,
   updateProductionTransaction,
   updateProduct,
+  updateUserRole,
   updateRawMaterial,
   updateSalesOrder,
   updateSupplier,
@@ -44,6 +49,15 @@ function requiredText(formData: FormData, key: string) {
 
 function requiredNumber(formData: FormData, key: string) {
   return Number(requiredText(formData, key));
+}
+
+function parseBatchSelection(formData: FormData) {
+  const [productId, batchCode, zone] = requiredText(formData, "batchSelection").split("|");
+  return {
+    productId: Number(productId),
+    batchCode: batchCode || "",
+    zone: zone || "Dispatch Bay"
+  };
 }
 
 async function requireLoggedInUser() {
@@ -324,15 +338,16 @@ export async function createSalesOrderAction(formData: FormData) {
   try {
     const user = await requireLoggedInUser();
     if (!canManageOrders(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to create orders.");
+    const batch = parseBatchSelection(formData);
     await createSalesOrder({
       customerId: requiredNumber(formData, "customerId"),
-      productId: requiredNumber(formData, "productId"),
+      productId: batch.productId,
       quantityCases: requiredNumber(formData, "quantityCases"),
       unitPrice: requiredNumber(formData, "unitPrice"),
       status: requiredText(formData, "status"),
       deliveryDate: requiredText(formData, "deliveryDate"),
-      zone: requiredText(formData, "zone"),
-      batchCode: requiredText(formData, "batchCode"),
+      zone: batch.zone,
+      batchCode: batch.batchCode,
       userId: user.id
     });
     revalidateCommon("/orders");
@@ -348,18 +363,19 @@ export async function updateSalesOrderAction(formData: FormData) {
   try {
     const user = await requireLoggedInUser();
     if (!canManageOrders(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to update orders.");
+    const batch = parseBatchSelection(formData);
     await updateSalesOrder({
       id: requiredNumber(formData, "id"),
       orderNo: requiredText(formData, "orderNo"),
       invoiceNo: requiredText(formData, "invoiceNo"),
       customerId: requiredNumber(formData, "customerId"),
-      productId: requiredNumber(formData, "productId"),
+      productId: batch.productId,
       quantityCases: requiredNumber(formData, "quantityCases"),
       unitPrice: requiredNumber(formData, "unitPrice"),
       status: requiredText(formData, "status"),
       deliveryDate: requiredText(formData, "deliveryDate"),
-      zone: requiredText(formData, "zone"),
-      batchCode: requiredText(formData, "batchCode"),
+      zone: batch.zone,
+      batchCode: batch.batchCode,
       userId: user.id
     });
     revalidateCommon("/orders");
@@ -390,7 +406,6 @@ export async function createPurchaseOrderAction(formData: FormData) {
     const user = await requireLoggedInUser();
     if (!canManagePurchases(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to create purchase orders.");
     await createPurchaseOrder({
-      poNo: requiredText(formData, "poNo"),
       supplierId: requiredNumber(formData, "supplierId"),
       rawMaterialId: requiredNumber(formData, "rawMaterialId"),
       status: requiredText(formData, "status"),
@@ -451,7 +466,6 @@ export async function createProductionTransactionAction(formData: FormData) {
     const user = await requireLoggedInUser();
     if (!canManageProduction(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to create production transactions.");
     await createProductionTransaction({
-      batchNo: requiredText(formData, "batchNo"),
       productId: requiredNumber(formData, "productId"),
       line: requiredText(formData, "line"),
       status: requiredText(formData, "status"),
@@ -464,6 +478,26 @@ export async function createProductionTransactionAction(formData: FormData) {
     finishWithMessage(returnTo, "success", "Production transaction recorded and inventory updated");
   } catch (error) {
     finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to record production.");
+  }
+}
+
+export async function recordCustomerPaymentAction(formData: FormData) {
+  const returnTo = getReturnTo(formData, "/finance");
+  try {
+    const user = await requireLoggedInUser();
+    if (!canManageOrders(user.role) && user.role !== "accountant") finishWithMessage(returnTo, "error", "You do not have permission to record payments.");
+    await recordCustomerPayment({
+      salesOrderId: requiredNumber(formData, "salesOrderId"),
+      amountReceived: requiredNumber(formData, "amountReceived"),
+      paymentDate: requiredText(formData, "paymentDate"),
+      note: requiredText(formData, "note"),
+      userId: user.id
+    });
+    revalidatePath("/finance");
+    revalidatePath("/orders");
+    finishWithMessage(returnTo, "success", "Payment recorded");
+  } catch (error) {
+    finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to record payment.");
   }
 }
 
@@ -593,5 +627,57 @@ export async function saveSettingsAction(formData: FormData) {
     finishWithMessage(returnTo, "success", "System settings updated");
   } catch (error) {
     finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to save settings.");
+  }
+}
+
+export async function createUserAction(formData: FormData) {
+  const returnTo = getReturnTo(formData, "/users");
+  try {
+    const user = await requireLoggedInUser();
+    if (user.role !== "admin") finishWithMessage(returnTo, "error", "Only admin can create users.");
+    await createUser({
+      username: requiredText(formData, "username"),
+      displayName: requiredText(formData, "displayName"),
+      role: requiredText(formData, "role") as SessionUser["role"],
+      password: requiredText(formData, "password"),
+      userId: user.id
+    });
+    revalidatePath("/users");
+    finishWithMessage(returnTo, "success", "User created");
+  } catch (error) {
+    finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to create user.");
+  }
+}
+
+export async function updateUserRoleAction(formData: FormData) {
+  const returnTo = getReturnTo(formData, "/users");
+  try {
+    const user = await requireLoggedInUser();
+    if (user.role !== "admin") finishWithMessage(returnTo, "error", "Only admin can update users.");
+    await updateUserRole({
+      id: requiredNumber(formData, "id"),
+      displayName: requiredText(formData, "displayName"),
+      role: requiredText(formData, "role") as SessionUser["role"],
+      userId: user.id
+    });
+    revalidatePath("/users");
+    finishWithMessage(returnTo, "success", "User updated");
+  } catch (error) {
+    finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to update user.");
+  }
+}
+
+export async function deleteUserAction(formData: FormData) {
+  const returnTo = getReturnTo(formData, "/users");
+  try {
+    const user = await requireLoggedInUser();
+    const targetId = requiredNumber(formData, "id");
+    if (user.role !== "admin") finishWithMessage(returnTo, "error", "Only admin can delete users.");
+    if (targetId === user.id) finishWithMessage(returnTo, "error", "You cannot delete your own account.");
+    await deleteUser(targetId, user.id);
+    revalidatePath("/users");
+    finishWithMessage(returnTo, "success", "User deleted");
+  } catch (error) {
+    finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to delete user.");
   }
 }

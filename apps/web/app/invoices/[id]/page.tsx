@@ -57,6 +57,7 @@ export default async function InvoicePage({ params }: InvoicePageProps) {
             <p className="section-kicker">Invoice Details</p>
             <strong>Spring Foods ERP</strong>
             <span>Invoice Date: {new Date(order.createdAt).toLocaleDateString()}</span>
+            <span>Payment Status: {order.paymentStatus}</span>
           </div>
         </div>
 
@@ -82,8 +83,8 @@ export default async function InvoicePage({ params }: InvoicePageProps) {
         </div>
 
         <div className="print-total">
-          <span>Amount Due</span>
-          <strong>{formatCurrency(order.amount, data.settings.currencyCode, data.settings.locale)}</strong>
+          <span>Balance Due</span>
+          <strong>{formatCurrency(order.balanceDue, data.settings.currencyCode, data.settings.locale)}</strong>
         </div>
 
         <p className="print-footer-note">{data.settings.printFooterNote}</p>
