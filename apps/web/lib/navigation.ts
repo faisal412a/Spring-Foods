@@ -52,6 +52,7 @@ export function getNavItems(user: SessionUser) {
   items.push({ href: "/settings", label: "Settings" });
 
   if (user.role === "admin") {
+    items.push({ href: "/users", label: "Users & Roles" });
     items.push({ href: "/audit", label: "Audit History" });
   }
 

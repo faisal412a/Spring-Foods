@@ -5,6 +5,7 @@ import { findUserByUsername, getUserById, hasDatabase } from "./db";
 import { createPasswordHash, signValue } from "./security";
 
 const SESSION_COOKIE = "spring_foods_session";
+const SESSION_MAX_AGE = 60 * 15;
 
 function signPayload(payload: string) {
   return signValue(payload);
@@ -46,7 +47,7 @@ export async function setSession(user: SessionUser) {
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    maxAge: 60 * 60 * 24 * 7
+    maxAge: SESSION_MAX_AGE
   });
 }
 
@@ -82,12 +83,19 @@ export async function getSessionUser() {
 
   if (!hasDatabase()) {
     const fallback = defaultUsers[userId - 1];
-    return fallback
-      ? { id: userId, username: fallback.username, displayName: fallback.displayName, role: fallback.role }
-      : null;
+    if (!fallback) {
+      return null;
+    }
+
+    await setSession({ id: userId, username: fallback.username, displayName: fallback.displayName, role: fallback.role });
+    return { id: userId, username: fallback.username, displayName: fallback.displayName, role: fallback.role };
   }
 
-  return getUserById(userId);
+  const user = await getUserById(userId);
+  if (user) {
+    await setSession(user);
+  }
+  return user;
 }
 
 export async function requireSessionUser() {

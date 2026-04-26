@@ -59,11 +59,16 @@ export type SalesOrderRecord = {
   city: string;
   status: "Draft" | "Confirmed" | "Packed" | "In Transit" | "Delivered";
   amount: number;
+  amountPaid: number;
+  balanceDue: number;
+  paymentStatus: "Due" | "Partially Paid" | "Paid";
   deliveryDate: string;
   productId: number;
   productName: string;
   quantityCases: number;
   unitPrice: number;
+  batchCode: string;
+  zone: string;
   createdAt: string;
 };
 
@@ -119,6 +124,26 @@ export type AuditLogRecord = {
   createdAt: string;
 };
 
+export type CustomerPaymentRecord = {
+  id: number;
+  salesOrderId: number;
+  invoiceNo: string;
+  customer: string;
+  amountReceived: number;
+  paymentDate: string;
+  note: string;
+  createdAt: string;
+};
+
+export type AvailableBatchRecord = {
+  productId: number;
+  productName: string;
+  batchCode: string;
+  zone: string;
+  availableCases: number;
+  expiryDate: string;
+};
+
 export type InventoryRow = {
   productId: number;
   code: string;
@@ -164,9 +189,11 @@ export type DashboardData = {
   customers: CustomerRecord[];
   suppliers: SupplierRecord[];
   salesOrders: SalesOrderRecord[];
+  customerPayments: CustomerPaymentRecord[];
   purchaseOrders: PurchaseOrderRecord[];
   productionTransactions: ProductionTransactionRecord[];
   stockMovements: StockMovementRecord[];
+  availableBatches: AvailableBatchRecord[];
   auditLogs: AuditLogRecord[];
   inventory: InventoryRow[];
   kpis: Kpi[];

@@ -325,6 +325,8 @@ export async function ensureDatabase() {
           city TEXT NOT NULL,
           status TEXT NOT NULL,
           amount NUMERIC(12, 2) NOT NULL,
+          amount_paid NUMERIC(12, 2) NOT NULL DEFAULT 0,
+          payment_status TEXT NOT NULL DEFAULT 'Due',
           delivery_date DATE NOT NULL,
           created_by INTEGER REFERENCES users(id),
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -389,6 +391,16 @@ export async function ensureDatabase() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS customer_payments (
+          id SERIAL PRIMARY KEY,
+          sales_order_id INTEGER NOT NULL REFERENCES sales_orders(id) ON DELETE CASCADE,
+          amount_received NUMERIC(12, 2) NOT NULL,
+          payment_date DATE NOT NULL,
+          note TEXT NOT NULL DEFAULT '',
+          created_by INTEGER REFERENCES users(id),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         CREATE TABLE IF NOT EXISTS document_counters (
           counter_name TEXT PRIMARY KEY,
           next_value INTEGER NOT NULL
@@ -410,6 +422,8 @@ export async function ensureDatabase() {
       `);
 
       await pool.query(`ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS invoice_no TEXT NOT NULL DEFAULT ''`);
+      await pool.query(`ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS amount_paid NUMERIC(12, 2) NOT NULL DEFAULT 0`);
+      await pool.query(`ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'Due'`);
       await pool.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS raw_material_id INTEGER REFERENCES raw_materials(id)`);
       await initializeCounters(pool);
       await ensureSystemSettings(pool);
@@ -482,6 +496,75 @@ export async function updateUserPassword(userId: number, password: string) {
   const pool = getPool();
   await pool.query("UPDATE users SET password_hash = $1 WHERE id = $2", [createPasswordHash(password), userId]);
   await recordAudit(pool, userId, "password-change", "user", `User ${userId}`, "Password updated.");
+}
+
+export async function createUser(input: { username: string; displayName: string; role: SessionUser["role"]; password: string; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO users (username, display_name, role, password_hash)
+     VALUES ($1, $2, $3, $4)`,
+    [input.username, input.displayName, input.role, createPasswordHash(input.password)]
+  );
+  await recordAudit(pool, input.userId, "create", "user", input.username, `Created user with ${input.role} role.`);
+}
+
+export async function updateUserRole(input: { id: number; displayName: string; role: SessionUser["role"]; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  await pool.query(`UPDATE users SET display_name = $2, role = $3 WHERE id = $1`, [input.id, input.displayName, input.role]);
+  await recordAudit(pool, input.userId, "update", "user", `User ${input.id}`, `Updated user role to ${input.role}.`);
+}
+
+export async function deleteUser(id: number, userId: number | null) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const label = await pool.query("SELECT username FROM users WHERE id = $1", [id]);
+  await pool.query("UPDATE sales_orders SET created_by = NULL WHERE created_by = $1", [id]);
+  await pool.query("UPDATE purchase_orders SET created_by = NULL WHERE created_by = $1", [id]);
+  await pool.query("UPDATE production_transactions SET created_by = NULL WHERE created_by = $1", [id]);
+  await pool.query("UPDATE stock_movements SET created_by = NULL WHERE created_by = $1", [id]);
+  await pool.query("UPDATE customer_payments SET created_by = NULL WHERE created_by = $1", [id]);
+  await pool.query("UPDATE audit_logs SET user_id = NULL WHERE user_id = $1", [id]);
+  await pool.query("DELETE FROM users WHERE id = $1", [id]);
+  await recordAudit(pool, userId, "delete", "user", label.rows[0]?.username ?? `User ${id}`, "Deleted user account.");
+}
+
+export async function recordCustomerPayment(input: { salesOrderId: number; amountReceived: number; paymentDate: string; note: string; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const order = await pool.query(
+    `SELECT so.invoice_no, so.amount, so.amount_paid, c.name AS customer
+     FROM sales_orders so
+     JOIN customers c ON c.id = so.customer_id
+     WHERE so.id = $1`,
+    [input.salesOrderId]
+  );
+  const current = order.rows[0];
+  if (!current) {
+    throw new Error("Invoice not found.");
+  }
+
+  const nextPaid = Number(current.amount_paid) + input.amountReceived;
+  const totalAmount = Number(current.amount);
+  const paymentStatus = nextPaid >= totalAmount ? "Paid" : nextPaid > 0 ? "Partially Paid" : "Due";
+
+  await pool.query(
+    `INSERT INTO customer_payments (sales_order_id, amount_received, payment_date, note, created_by)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [input.salesOrderId, input.amountReceived, input.paymentDate, input.note, input.userId]
+  );
+  await pool.query(
+    `UPDATE sales_orders
+     SET amount_paid = $2, payment_status = $3
+     WHERE id = $1`,
+    [input.salesOrderId, nextPaid, paymentStatus]
+  );
+  await recordAudit(pool, input.userId, "payment", "invoice", current.invoice_no, `Recorded payment of ${input.amountReceived} for ${current.customer}.`);
 }
 
 export async function getSystemSettings() {
@@ -560,7 +643,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
   const pool = getPool();
   const settings = await getSystemSettings();
 
-  const [users, products, rawMaterials, customers, suppliers, salesOrders, purchaseOrders, productionTransactions, stockMovements, inventory, auditLogs] =
+  const [users, products, rawMaterials, customers, suppliers, salesOrders, purchaseOrders, productionTransactions, stockMovements, availableBatches, customerPayments, inventory, auditLogs] =
     await Promise.all([
       pool.query("SELECT id, username, display_name, role FROM users ORDER BY id"),
       pool.query("SELECT id, code, name, category, unit_price, storage, shelf_life_days, reorder_level_cases FROM products ORDER BY name"),
@@ -576,12 +659,21 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
       pool.query("SELECT id, name, segment, city, email, phone, receivable FROM customers ORDER BY name"),
       pool.query("SELECT id, name, material, rating, lead_time_days, status, email, phone FROM suppliers ORDER BY name"),
       pool.query(
-        `SELECT so.id, so.order_no, so.invoice_no, so.customer_id, c.name AS customer, so.city, so.status, so.amount, so.delivery_date,
-                soi.product_id, p.name AS product_name, soi.quantity_cases, soi.unit_price, so.created_at
+        `SELECT so.id, so.order_no, so.invoice_no, so.customer_id, c.name AS customer, so.city, so.status, so.amount, so.amount_paid, so.payment_status, so.delivery_date,
+                soi.product_id, p.name AS product_name, soi.quantity_cases, soi.unit_price, so.created_at,
+                COALESCE(sm.batch_code, '') AS batch_code,
+                COALESCE(sm.zone, '') AS zone
          FROM sales_orders so
          JOIN customers c ON c.id = so.customer_id
          JOIN sales_order_items soi ON soi.sales_order_id = so.id
          JOIN products p ON p.id = soi.product_id
+         LEFT JOIN LATERAL (
+           SELECT batch_code, zone
+           FROM stock_movements
+           WHERE reference_type = 'invoice' AND reference_id = so.invoice_no
+           ORDER BY created_at DESC
+           LIMIT 1
+         ) sm ON TRUE
          ORDER BY so.created_at DESC`
       ),
       pool.query(
@@ -602,6 +694,24 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
          JOIN products p ON p.id = sm.product_id
          ORDER BY sm.created_at DESC
          LIMIT 40`
+      ),
+      pool.query(
+        `SELECT p.id AS product_id, p.name AS product_name, sm.batch_code, sm.zone,
+                COALESCE(MAX(sm.expiry_date)::text, '') AS expiry_date,
+                COALESCE(SUM(CASE WHEN sm.movement_type = 'OUT' THEN -sm.quantity_cases ELSE sm.quantity_cases END), 0) AS available_cases
+         FROM stock_movements sm
+         JOIN products p ON p.id = sm.product_id
+         WHERE sm.batch_code <> ''
+         GROUP BY p.id, p.name, sm.batch_code, sm.zone
+         HAVING COALESCE(SUM(CASE WHEN sm.movement_type = 'OUT' THEN -sm.quantity_cases ELSE sm.quantity_cases END), 0) > 0
+         ORDER BY p.name, sm.batch_code`
+      ),
+      pool.query(
+        `SELECT cp.id, cp.sales_order_id, so.invoice_no, c.name AS customer, cp.amount_received, cp.payment_date, cp.note, cp.created_at
+         FROM customer_payments cp
+         JOIN sales_orders so ON so.id = cp.sales_order_id
+         JOIN customers c ON c.id = so.customer_id
+         ORDER BY cp.created_at DESC`
       ),
       pool.query(
         `SELECT p.id AS product_id, p.code, p.name AS product_name, p.category, p.storage, p.reorder_level_cases,
@@ -632,11 +742,16 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     city: row.city,
     status: row.status,
     amount: Number(row.amount),
+    amountPaid: Number(row.amount_paid),
+    balanceDue: Number(row.amount) - Number(row.amount_paid),
+    paymentStatus: row.payment_status,
     deliveryDate: toIsoDate(row.delivery_date),
     productId: row.product_id,
     productName: row.product_name,
     quantityCases: row.quantity_cases,
     unitPrice: Number(row.unit_price),
+    batchCode: row.batch_code,
+    zone: row.zone,
     createdAt: row.created_at.toISOString()
   }));
 
@@ -681,6 +796,26 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     createdAt: row.created_at.toISOString()
   }));
 
+  const batchRows = availableBatches.rows.map((row) => ({
+    productId: row.product_id,
+    productName: row.product_name,
+    batchCode: row.batch_code,
+    zone: row.zone,
+    availableCases: Number(row.available_cases),
+    expiryDate: toIsoDate(row.expiry_date)
+  }));
+
+  const paymentRows = customerPayments.rows.map((row) => ({
+    id: row.id,
+    salesOrderId: row.sales_order_id,
+    invoiceNo: row.invoice_no,
+    customer: row.customer,
+    amountReceived: Number(row.amount_received),
+    paymentDate: toIsoDate(row.payment_date),
+    note: row.note,
+    createdAt: row.created_at.toISOString()
+  }));
+
   const inventoryRows = inventory.rows.map((row) => ({
     productId: row.product_id,
     code: row.code,
@@ -707,7 +842,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
 
   const revenue = salesOrderRows.reduce((sum, item) => sum + item.amount, 0);
   const payable = purchaseOrderRows.reduce((sum, item) => sum + item.cost, 0);
-  const receivable = customers.rows.reduce((sum, row) => sum + Number(row.receivable), 0);
+  const receivable = salesOrderRows.reduce((sum, row) => sum + row.balanceDue, 0);
   const lowStock = inventoryRows.filter((item) => item.onHandCases <= item.reorderLevelCases).length;
 
   return {
@@ -757,9 +892,11 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
       phone: row.phone
     })),
     salesOrders: salesOrderRows,
+    customerPayments: paymentRows,
     purchaseOrders: purchaseOrderRows,
     productionTransactions: productionRows,
     stockMovements: stockRows,
+    availableBatches: batchRows,
     auditLogs: auditRows,
     inventory: inventoryRows,
     kpis: [
@@ -783,6 +920,11 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
     productId: index + 1,
     ...order,
     invoiceNo: `INV-${DEFAULT_COUNTER_START + index}`,
+    amountPaid: 0,
+    balanceDue: order.amount,
+    paymentStatus: "Due" as const,
+    batchCode: `${order.orderNo}-ALLOC`,
+    zone: "Dispatch Bay",
     createdAt: new Date().toISOString()
   }));
 
@@ -835,6 +977,7 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
     customers: seedCustomers.map((row, index) => ({ id: index + 1, ...row })),
     suppliers: seedSuppliers.map((row, index) => ({ id: index + 1, ...row })),
     salesOrders,
+    customerPayments: [],
     purchaseOrders,
     productionTransactions,
     stockMovements: seedStockMovements.map((row, index) => ({
@@ -850,6 +993,14 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
       referenceId: row.referenceId,
       notes: row.notes,
       createdAt: new Date().toISOString()
+    })),
+    availableBatches: seedStockMovements.map((row, index) => ({
+      productId: index + 1,
+      productName: seedProducts[index]?.name ?? row.productCode,
+      batchCode: row.batchCode,
+      zone: row.zone,
+      availableCases: row.quantityCases,
+      expiryDate: row.expiryDate
     })),
     auditLogs: [
       { id: 1, actorName: "System", actorRole: "system", actionType: "demo-mode", entityType: "system", entityLabel: "Database", details: "Connect Railway Postgres to enable edits, deletes, password changes and audit persistence.", createdAt: new Date().toISOString() }
@@ -1108,7 +1259,18 @@ export async function updateSalesOrder(input: {
   const amount = input.quantityCases * input.unitPrice;
 
   await pool.query(
-    `UPDATE sales_orders SET customer_id = $2, city = $3, status = $4, amount = $5, delivery_date = $6 WHERE id = $1`,
+    `UPDATE sales_orders
+     SET customer_id = $2,
+         city = $3,
+         status = $4,
+         amount = $5,
+         delivery_date = $6,
+         payment_status = CASE
+           WHEN amount_paid >= $5 THEN 'Paid'
+           WHEN amount_paid > 0 THEN 'Partially Paid'
+           ELSE 'Due'
+         END
+     WHERE id = $1`,
     [input.id, input.customerId, customer.rows[0]?.city ?? "", input.status, amount, input.deliveryDate]
   );
   await pool.query(
@@ -1144,17 +1306,18 @@ export async function deleteSalesOrder(id: number, userId: number | null) {
   await recordAudit(pool, userId, "delete", "sales-order", label.rows[0]?.order_no ?? `Order ${id}`, "Deleted sales order and removed related inventory issue.");
 }
 
-export async function createPurchaseOrder(input: { poNo: string; supplierId: number; rawMaterialId: number; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
+export async function createPurchaseOrder(input: { supplierId: number; rawMaterialId: number; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
+  const poNo = await getNextDocumentNumber(pool, "purchase_order", "PO-");
   const rawMaterial = await pool.query("SELECT name FROM raw_materials WHERE id = $1", [input.rawMaterialId]);
   await pool.query(
     `INSERT INTO purchase_orders (po_no, supplier_id, raw_material_id, material, status, expected_date, quantity_cases, cost, created_by)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [input.poNo, input.supplierId, input.rawMaterialId, rawMaterial.rows[0]?.name ?? "", input.status, input.expectedDate, input.quantityCases, input.cost, input.userId]
+    [poNo, input.supplierId, input.rawMaterialId, rawMaterial.rows[0]?.name ?? "", input.status, input.expectedDate, input.quantityCases, input.cost, input.userId]
   );
-  await recordAudit(pool, input.userId, "create", "purchase-order", input.poNo, "Created raw material purchase order.");
+  await recordAudit(pool, input.userId, "create", "purchase-order", poNo, "Created raw material purchase order.");
 }
 
 export async function updatePurchaseOrder(input: { id: number; poNo: string; supplierId: number; rawMaterialId: number; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
@@ -1180,25 +1343,26 @@ export async function deletePurchaseOrder(id: number, userId: number | null) {
   await recordAudit(pool, userId, "delete", "purchase-order", label.rows[0]?.po_no ?? `PO ${id}`, "Deleted purchase order.");
 }
 
-export async function createProductionTransaction(input: { batchNo: string; productId: number; line: string; status: string; plannedCases: number; producedCases: number; userId: number | null }) {
+export async function createProductionTransaction(input: { batchNo?: string; productId: number; line: string; status: string; plannedCases: number; producedCases: number; userId: number | null }) {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
   const product = await pool.query("SELECT name FROM products WHERE id = $1", [input.productId]);
+  const batchNo = input.batchNo?.trim() || (await getNextDocumentNumber(pool, "production_batch", "BATCH-"));
   await pool.query(
     `INSERT INTO production_transactions (batch_no, product_id, line, status, planned_cases, produced_cases, created_by)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [input.batchNo, input.productId, input.line, input.status, input.plannedCases, input.producedCases, input.userId]
+    [batchNo, input.productId, input.line, input.status, input.plannedCases, input.producedCases, input.userId]
   );
 
   await replaceProductionMovement(pool, {
-    batchNo: input.batchNo,
+    batchNo,
     productId: input.productId,
     producedCases: input.producedCases,
     userId: input.userId
   });
 
-  await recordAudit(pool, input.userId, "create", "production", input.batchNo, `Recorded production for ${product.rows[0]?.name ?? "product"} and posted inventory receipt.`);
+  await recordAudit(pool, input.userId, "create", "production", batchNo, `Recorded production for ${product.rows[0]?.name ?? "product"} and posted inventory receipt.`);
 }
 
 export async function updateProductionTransaction(input: { id: number; batchNo: string; previousBatchNo: string; productId: number; line: string; status: string; plannedCases: number; producedCases: number; userId: number | null }) {
@@ -1268,7 +1432,7 @@ export async function exportBackupData() {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
-  const [users, products, rawMaterials, customers, suppliers, salesOrders, salesOrderItems, purchaseOrders, productionTransactions, stockMovements, auditLogs, counters, settings] =
+  const [users, products, rawMaterials, customers, suppliers, salesOrders, salesOrderItems, purchaseOrders, productionTransactions, stockMovements, customerPayments, auditLogs, counters, settings] =
     await Promise.all([
       pool.query("SELECT id, username, display_name, role, created_at FROM users ORDER BY id"),
       pool.query("SELECT * FROM products ORDER BY id"),
@@ -1280,6 +1444,7 @@ export async function exportBackupData() {
       pool.query("SELECT * FROM purchase_orders ORDER BY id"),
       pool.query("SELECT * FROM production_transactions ORDER BY id"),
       pool.query("SELECT * FROM stock_movements ORDER BY id"),
+      pool.query("SELECT * FROM customer_payments ORDER BY id"),
       pool.query("SELECT * FROM audit_logs ORDER BY id"),
       pool.query("SELECT * FROM document_counters ORDER BY counter_name"),
       pool.query("SELECT * FROM system_settings ORDER BY id")
@@ -1299,6 +1464,7 @@ export async function exportBackupData() {
       purchaseOrders: purchaseOrders.rows,
       productionTransactions: productionTransactions.rows,
       stockMovements: stockMovements.rows,
+      customerPayments: customerPayments.rows,
       auditLogs: auditLogs.rows,
       documentCounters: counters.rows,
       systemSettings: settings.rows
