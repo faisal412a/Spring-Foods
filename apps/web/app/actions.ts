@@ -32,6 +32,7 @@ import {
   updateSystemSettings,
   deleteUser,
   recordCustomerPayment,
+  recordSupplierPayment,
   updateCustomer,
   updatePurchaseOrder,
   updateProductionTransaction,
@@ -498,6 +499,27 @@ export async function recordCustomerPaymentAction(formData: FormData) {
     finishWithMessage(returnTo, "success", "Payment recorded");
   } catch (error) {
     finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to record payment.");
+  }
+}
+
+export async function recordSupplierPaymentAction(formData: FormData) {
+  const returnTo = getReturnTo(formData, "/finance");
+  try {
+    const user = await requireLoggedInUser();
+    if (!canManagePurchases(user.role)) finishWithMessage(returnTo, "error", "You do not have permission to record supplier payments.");
+    await recordSupplierPayment({
+      purchaseOrderId: requiredNumber(formData, "purchaseOrderId"),
+      amountPaid: requiredNumber(formData, "amountPaid"),
+      paymentDate: requiredText(formData, "paymentDate"),
+      note: requiredText(formData, "note"),
+      userId: user.id
+    });
+    revalidatePath("/finance");
+    revalidatePath("/purchases");
+    revalidatePath("/suppliers");
+    finishWithMessage(returnTo, "success", "Supplier payment recorded");
+  } catch (error) {
+    finishWithMessage(returnTo, "error", error instanceof Error ? error.message : "Unable to record supplier payment.");
   }
 }
 

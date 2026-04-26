@@ -48,6 +48,7 @@ export type SupplierRecord = {
   status: "Approved" | "Review";
   email: string;
   phone: string;
+  payable: number;
 };
 
 export type SalesOrderRecord = {
@@ -83,6 +84,9 @@ export type PurchaseOrderRecord = {
   expectedDate: string;
   quantityCases: number;
   cost: number;
+  amountPaid: number;
+  balanceDue: number;
+  paymentStatus: "Due" | "Partially Paid" | "Paid";
   createdAt: string;
 };
 
@@ -135,6 +139,17 @@ export type CustomerPaymentRecord = {
   createdAt: string;
 };
 
+export type SupplierPaymentRecord = {
+  id: number;
+  purchaseOrderId: number;
+  poNo: string;
+  supplier: string;
+  amountPaid: number;
+  paymentDate: string;
+  note: string;
+  createdAt: string;
+};
+
 export type AvailableBatchRecord = {
   productId: number;
   productName: string;
@@ -154,6 +169,7 @@ export type InventoryRow = {
   reorderLevelCases: number;
   latestZone: string;
   latestBatch: string;
+  latestProductionDate: string;
   latestExpiryDate: string;
 };
 
@@ -190,6 +206,7 @@ export type DashboardData = {
   suppliers: SupplierRecord[];
   salesOrders: SalesOrderRecord[];
   customerPayments: CustomerPaymentRecord[];
+  supplierPayments: SupplierPaymentRecord[];
   purchaseOrders: PurchaseOrderRecord[];
   productionTransactions: ProductionTransactionRecord[];
   stockMovements: StockMovementRecord[];

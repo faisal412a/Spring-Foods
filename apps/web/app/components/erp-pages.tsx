@@ -19,6 +19,7 @@ import {
   deleteUserAction,
   resetDataAction,
   recordCustomerPaymentAction,
+  recordSupplierPaymentAction,
   saveSettingsAction,
   updateCustomerAction,
   updateProductAction,
@@ -337,7 +338,11 @@ export function InventoryModule({ data }: { data: DashboardData }) {
             <p className="section-kicker">Inventory</p>
             <h2>Current stock position</h2>
           </div>
-          <Link href="/api/reports/inventory.csv" className="subtle-button">Export inventory</Link>
+          <form action="/api/reports/inventory.csv" method="get" className="filter-form compact-filter-form">
+            <input name="from" type="date" />
+            <input name="to" type="date" />
+            <button type="submit" className="subtle-button">Export inventory</button>
+          </form>
         </div>
         <div className="table-wrap">
           <table>
@@ -416,6 +421,15 @@ export function CustomersModule({ data, user, params }: { data: DashboardData; u
     <section className="module-grid">
       <article className="panel span-two">
         <div className="panel-head"><div><p className="section-kicker">Customers</p><h2>Customer database</h2></div></div>
+        <form action="/api/customers/statement.csv" method="get" className="filter-form compact-filter-form">
+          <select name="customerId" required>
+            <option value="">Statement customer</option>
+            {data.customers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <input name="from" type="date" />
+          <input name="to" type="date" />
+          <button type="submit" className="subtle-button">Download statement</button>
+        </form>
         <div className="table-wrap">
           <table>
             <thead><tr><th>Name</th><th>Segment</th><th>City</th><th>Email</th><th>Receivable</th><th>Actions</th></tr></thead>
@@ -428,6 +442,8 @@ export function CustomersModule({ data, user, params }: { data: DashboardData; u
                   <td>{item.email}</td>
                   <td>{formatCurrency(item.receivable, data.settings.currencyCode, data.settings.locale)}</td>
                   <td className="action-cell">
+                    <Link href={`/api/customers/${item.id}/statement.csv`} className="text-link">Full statement</Link>
+                    <Link href={`/api/customers/${item.id}/statement.csv?from=${new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10)}&to=${new Date().toISOString().slice(0, 10)}`} className="text-link">This month</Link>
                     {canEdit ? <Link href={`/customers?customerId=${item.id}`} className="text-link">Edit</Link> : null}
                     {canEdit ? (
                       <form action={deleteCustomerAction}>
@@ -455,7 +471,7 @@ export function CustomersModule({ data, user, params }: { data: DashboardData; u
             <input name="city" placeholder="City" defaultValue={editingCustomer?.city} required />
             <input name="email" type="email" placeholder="Email (optional)" defaultValue={editingCustomer?.email} />
             <input name="phone" placeholder="Phone (optional)" defaultValue={editingCustomer?.phone} />
-            <input name="receivable" type="number" step="0.01" placeholder="Receivable" defaultValue={editingCustomer?.receivable} required />
+            <input type="hidden" name="receivable" value="0" />
             <button type="submit" className="toolbar-button primary-button">{editingCustomer ? "Update customer" : "Create customer"}</button>
           </form>
         ) : (
@@ -479,9 +495,18 @@ export function SuppliersModule({ data, user, params }: { data: DashboardData; u
     <section className="module-grid">
       <article className="panel span-two">
         <div className="panel-head"><div><p className="section-kicker">Suppliers</p><h2>Supplier master</h2></div></div>
+        <form action="/api/suppliers/statement.csv" method="get" className="filter-form compact-filter-form">
+          <select name="supplierId" required>
+            <option value="">Statement supplier</option>
+            {data.suppliers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <input name="from" type="date" />
+          <input name="to" type="date" />
+          <button type="submit" className="subtle-button">Download statement</button>
+        </form>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Name</th><th>Material</th><th>Rating</th><th>Status</th><th>Phone</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Name</th><th>Material</th><th>Rating</th><th>Status</th><th>Phone</th><th>Payable</th><th>Actions</th></tr></thead>
             <tbody>
               {data.suppliers.map((item) => (
                 <tr key={item.id}>
@@ -490,7 +515,10 @@ export function SuppliersModule({ data, user, params }: { data: DashboardData; u
                   <td>{item.rating}</td>
                   <td>{item.status}</td>
                   <td>{item.phone}</td>
+                  <td>{formatCurrency(item.payable, data.settings.currencyCode, data.settings.locale)}</td>
                   <td className="action-cell">
+                    <Link href={`/api/suppliers/${item.id}/statement.csv`} className="text-link">Full statement</Link>
+                    <Link href={`/api/suppliers/${item.id}/statement.csv?from=${new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10)}&to=${new Date().toISOString().slice(0, 10)}`} className="text-link">This month</Link>
                     {canEdit ? <Link href={`/suppliers?supplierId=${item.id}`} className="text-link">Edit</Link> : null}
                     {canEdit ? (
                       <form action={deleteSupplierAction}>
@@ -632,7 +660,7 @@ export function PurchasesModule({ data, user, params }: { data: DashboardData; u
         <div className="panel-head"><div><p className="section-kicker">Purchasing</p><h2>Raw material purchase orders</h2></div></div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>PO</th><th>Supplier</th><th>Material</th><th>Status</th><th>Expected</th><th>Cost</th><th>Actions</th></tr></thead>
+            <thead><tr><th>PO</th><th>Supplier</th><th>Material</th><th>Status</th><th>Expected</th><th>Cost</th><th>Paid</th><th>Balance</th><th>Payment</th><th>Actions</th></tr></thead>
             <tbody>
               {data.purchaseOrders.map((item) => (
                 <tr key={item.id}>
@@ -642,6 +670,9 @@ export function PurchasesModule({ data, user, params }: { data: DashboardData; u
                   <td>{item.status}</td>
                   <td>{item.expectedDate}</td>
                   <td>{formatCurrency(item.cost, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{formatCurrency(item.amountPaid, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{formatCurrency(item.balanceDue, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{item.paymentStatus}</td>
                   <td className="action-cell">
                     <Link href={`/purchases?purchaseId=${item.id}`} className="text-link">Edit</Link>
                     <Link href={`/purchase-orders/${item.id}`} className="text-link">Print PO</Link>
@@ -701,7 +732,14 @@ export function ProductionModule({ data, user, params }: { data: DashboardData; 
   return (
     <section className="module-grid">
       <article className="panel span-two">
-        <div className="panel-head"><div><p className="section-kicker">Production</p><h2>Production transactions</h2></div></div>
+        <div className="panel-head">
+          <div><p className="section-kicker">Production</p><h2>Production transactions</h2></div>
+          <form action="/api/reports/production.csv" method="get" className="filter-form compact-filter-form">
+            <input name="from" type="date" />
+            <input name="to" type="date" />
+            <button type="submit" className="subtle-button">Export production</button>
+          </form>
+        </div>
         <div className="table-wrap">
           <table>
             <thead><tr><th>Batch</th><th>Product</th><th>Line</th><th>Status</th><th>Planned</th><th>Produced</th><th>Actions</th></tr></thead>
@@ -765,7 +803,14 @@ export function FinanceModule({ data, user }: { data: DashboardData; user: Sessi
   return (
     <section className="panel-grid two-up">
       <article className="panel">
-        <div className="panel-head"><div><p className="section-kicker">Invoices</p><h2>Receivables and payment status</h2></div></div>
+        <div className="panel-head">
+          <div><p className="section-kicker">Invoices</p><h2>Receivables and payment status</h2></div>
+          <form action="/api/reports/receivables.csv" method="get" className="filter-form compact-filter-form">
+            <input name="from" type="date" />
+            <input name="to" type="date" />
+            <button type="submit" className="subtle-button">Export receivables</button>
+          </form>
+        </div>
         <div className="table-wrap">
           <table>
             <thead><tr><th>Invoice</th><th>Customer</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th><th>Print</th></tr></thead>
@@ -804,26 +849,70 @@ export function FinanceModule({ data, user }: { data: DashboardData; user: Sessi
       </article>
 
       <article className="panel">
-        <div className="panel-head"><div><p className="section-kicker">Payables</p><h2>Open purchase commitments</h2></div></div>
-        <div className="finance-list">
-          {data.purchaseOrders.map((item) => (
-            <div key={item.id}>
-              <span>{item.poNo} · {item.supplier}</span>
-              <strong>{formatCurrency(item.cost, data.settings.currencyCode, data.settings.locale)}</strong>
-            </div>
-          ))}
+        <div className="panel-head">
+          <div><p className="section-kicker">Payables</p><h2>Open supplier commitments</h2></div>
+          <form action="/api/reports/payables.csv" method="get" className="filter-form compact-filter-form">
+            <input name="from" type="date" />
+            <input name="to" type="date" />
+            <button type="submit" className="subtle-button">Export payables</button>
+          </form>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>PO</th><th>Supplier</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead>
+            <tbody>
+              {data.purchaseOrders.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.poNo}</td>
+                  <td>{item.supplier}</td>
+                  <td>{formatCurrency(item.cost, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{formatCurrency(item.amountPaid, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{formatCurrency(item.balanceDue, data.settings.currencyCode, data.settings.locale)}</td>
+                  <td>{item.paymentStatus}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </article>
 
       <article className="panel">
-        <div className="panel-head"><div><p className="section-kicker">Recent Payments</p><h2>Latest customer receipts</h2></div></div>
+        <div className="panel-head"><div><p className="section-kicker">Payments Out</p><h2>Record supplier payment</h2></div></div>
+        <form action={recordSupplierPaymentAction} className="form-grid">
+          {hiddenReturn("/finance")}
+          <select name="purchaseOrderId" required>
+            <option value="">Select purchase order</option>
+            {data.purchaseOrders.filter((item) => item.balanceDue > 0).map((item) => (
+              <option key={item.id} value={item.id}>{item.poNo} · {item.supplier} · {formatCurrency(item.balanceDue, data.settings.currencyCode, data.settings.locale)} due</option>
+            ))}
+          </select>
+          <input name="amountPaid" type="number" step="0.01" placeholder="Amount paid" required />
+          <input name="paymentDate" type="date" required />
+          <input name="note" placeholder="Note (optional)" />
+          <button type="submit" className="toolbar-button primary-button">Record supplier payment</button>
+        </form>
+      </article>
+
+      <article className="panel">
+        <div className="panel-head"><div><p className="section-kicker">Recent Payments</p><h2>Latest customer and supplier entries</h2></div></div>
         <div className="finance-list">
-          {data.customerPayments.length ? data.customerPayments.slice(0, 6).map((item) => (
+          {[...data.customerPayments.map((item) => ({
+            id: `customer-${item.id}`,
+            label: `${item.invoiceNo} · ${item.customer}`,
+            amount: item.amountReceived,
+            kind: "Customer receipt"
+          })), ...data.supplierPayments.map((item) => ({
+            id: `supplier-${item.id}`,
+            label: `${item.poNo} · ${item.supplier}`,
+            amount: item.amountPaid,
+            kind: "Supplier payment"
+          }))].slice(0, 8).map((item) => (
             <div key={item.id}>
-              <span>{item.invoiceNo} · {item.customer}</span>
-              <strong>{formatCurrency(item.amountReceived, data.settings.currencyCode, data.settings.locale)}</strong>
+              <span>{item.kind} · {item.label}</span>
+              <strong>{formatCurrency(item.amount, data.settings.currencyCode, data.settings.locale)}</strong>
             </div>
-          )) : <p>No payments recorded yet.</p>}
+          ))}
+          {!data.customerPayments.length && !data.supplierPayments.length ? <p>No payments recorded yet.</p> : null}
         </div>
       </article>
     </section>

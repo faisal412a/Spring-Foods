@@ -401,6 +401,16 @@ export async function ensureDatabase() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS supplier_payments (
+          id SERIAL PRIMARY KEY,
+          purchase_order_id INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+          amount_paid NUMERIC(12, 2) NOT NULL,
+          payment_date DATE NOT NULL,
+          note TEXT NOT NULL DEFAULT '',
+          created_by INTEGER REFERENCES users(id),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         CREATE TABLE IF NOT EXISTS document_counters (
           counter_name TEXT PRIMARY KEY,
           next_value INTEGER NOT NULL
@@ -425,6 +435,8 @@ export async function ensureDatabase() {
       await pool.query(`ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS amount_paid NUMERIC(12, 2) NOT NULL DEFAULT 0`);
       await pool.query(`ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'Due'`);
       await pool.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS raw_material_id INTEGER REFERENCES raw_materials(id)`);
+      await pool.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS amount_paid NUMERIC(12, 2) NOT NULL DEFAULT 0`);
+      await pool.query(`ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'Due'`);
       await initializeCounters(pool);
       await ensureSystemSettings(pool);
 
@@ -528,6 +540,7 @@ export async function deleteUser(id: number, userId: number | null) {
   await pool.query("UPDATE production_transactions SET created_by = NULL WHERE created_by = $1", [id]);
   await pool.query("UPDATE stock_movements SET created_by = NULL WHERE created_by = $1", [id]);
   await pool.query("UPDATE customer_payments SET created_by = NULL WHERE created_by = $1", [id]);
+  await pool.query("UPDATE supplier_payments SET created_by = NULL WHERE created_by = $1", [id]);
   await pool.query("UPDATE audit_logs SET user_id = NULL WHERE user_id = $1", [id]);
   await pool.query("DELETE FROM users WHERE id = $1", [id]);
   await recordAudit(pool, userId, "delete", "user", label.rows[0]?.username ?? `User ${id}`, "Deleted user account.");
@@ -565,6 +578,40 @@ export async function recordCustomerPayment(input: { salesOrderId: number; amoun
     [input.salesOrderId, nextPaid, paymentStatus]
   );
   await recordAudit(pool, input.userId, "payment", "invoice", current.invoice_no, `Recorded payment of ${input.amountReceived} for ${current.customer}.`);
+}
+
+export async function recordSupplierPayment(input: { purchaseOrderId: number; amountPaid: number; paymentDate: string; note: string; userId: number | null }) {
+  assertDatabaseConfigured();
+  await ensureDatabase();
+  const pool = getPool();
+  const purchaseOrder = await pool.query(
+    `SELECT po.po_no, po.cost, po.amount_paid, s.name AS supplier
+     FROM purchase_orders po
+     JOIN suppliers s ON s.id = po.supplier_id
+     WHERE po.id = $1`,
+    [input.purchaseOrderId]
+  );
+  const current = purchaseOrder.rows[0];
+  if (!current) {
+    throw new Error("Purchase order not found.");
+  }
+
+  const nextPaid = Number(current.amount_paid) + input.amountPaid;
+  const totalAmount = Number(current.cost);
+  const paymentStatus = nextPaid >= totalAmount ? "Paid" : nextPaid > 0 ? "Partially Paid" : "Due";
+
+  await pool.query(
+    `INSERT INTO supplier_payments (purchase_order_id, amount_paid, payment_date, note, created_by)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [input.purchaseOrderId, input.amountPaid, input.paymentDate, input.note, input.userId]
+  );
+  await pool.query(
+    `UPDATE purchase_orders
+     SET amount_paid = $2, payment_status = $3
+     WHERE id = $1`,
+    [input.purchaseOrderId, nextPaid, paymentStatus]
+  );
+  await recordAudit(pool, input.userId, "payment", "purchase-order", current.po_no, `Recorded supplier payment of ${input.amountPaid} for ${current.supplier}.`);
 }
 
 export async function getSystemSettings() {
@@ -643,7 +690,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
   const pool = getPool();
   const settings = await getSystemSettings();
 
-  const [users, products, rawMaterials, customers, suppliers, salesOrders, purchaseOrders, productionTransactions, stockMovements, availableBatches, customerPayments, inventory, auditLogs] =
+  const [users, products, rawMaterials, customers, suppliers, salesOrders, purchaseOrders, productionTransactions, stockMovements, availableBatches, customerPayments, supplierPayments, inventory, auditLogs] =
     await Promise.all([
       pool.query("SELECT id, username, display_name, role FROM users ORDER BY id"),
       pool.query("SELECT id, code, name, category, unit_price, storage, shelf_life_days, reorder_level_cases FROM products ORDER BY name"),
@@ -677,7 +724,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
          ORDER BY so.created_at DESC`
       ),
       pool.query(
-        `SELECT po.id, po.po_no, po.supplier_id, po.raw_material_id, s.name AS supplier, po.material, po.status, po.expected_date, po.quantity_cases, po.cost, po.created_at
+        `SELECT po.id, po.po_no, po.supplier_id, po.raw_material_id, s.name AS supplier, po.material, po.status, po.expected_date, po.quantity_cases, po.cost, po.amount_paid, po.payment_status, po.created_at
          FROM purchase_orders po
          JOIN suppliers s ON s.id = po.supplier_id
          ORDER BY po.created_at DESC`
@@ -714,9 +761,17 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
          ORDER BY cp.created_at DESC`
       ),
       pool.query(
+        `SELECT sp.id, sp.purchase_order_id, po.po_no, s.name AS supplier, sp.amount_paid, sp.payment_date, sp.note, sp.created_at
+         FROM supplier_payments sp
+         JOIN purchase_orders po ON po.id = sp.purchase_order_id
+         JOIN suppliers s ON s.id = po.supplier_id
+         ORDER BY sp.created_at DESC`
+      ),
+      pool.query(
         `SELECT p.id AS product_id, p.code, p.name AS product_name, p.category, p.storage, p.reorder_level_cases,
                 COALESCE(SUM(CASE WHEN sm.movement_type = 'OUT' THEN -sm.quantity_cases ELSE sm.quantity_cases END), 0) AS on_hand_cases,
                 COALESCE(MAX(sm.zone), '') AS latest_zone, COALESCE(MAX(sm.batch_code), '') AS latest_batch,
+                COALESCE(MAX(sm.created_at)::text, '') AS latest_production_date,
                 COALESCE(MAX(sm.expiry_date)::text, '') AS latest_expiry_date
          FROM products p
          LEFT JOIN stock_movements sm ON sm.product_id = p.id
@@ -766,6 +821,9 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     expectedDate: toIsoDate(row.expected_date),
     quantityCases: row.quantity_cases,
     cost: Number(row.cost),
+    amountPaid: Number(row.amount_paid),
+    balanceDue: Number(row.cost) - Number(row.amount_paid),
+    paymentStatus: row.payment_status,
     createdAt: row.created_at.toISOString()
   }));
 
@@ -816,6 +874,27 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     createdAt: row.created_at.toISOString()
   }));
 
+  const supplierPaymentRows = supplierPayments.rows.map((row) => ({
+    id: row.id,
+    purchaseOrderId: row.purchase_order_id,
+    poNo: row.po_no,
+    supplier: row.supplier,
+    amountPaid: Number(row.amount_paid),
+    paymentDate: toIsoDate(row.payment_date),
+    note: row.note,
+    createdAt: row.created_at.toISOString()
+  }));
+
+  const receivableByCustomer = new Map<number, number>();
+  for (const order of salesOrderRows) {
+    receivableByCustomer.set(order.customerId, (receivableByCustomer.get(order.customerId) ?? 0) + order.balanceDue);
+  }
+
+  const payableBySupplier = new Map<number, number>();
+  for (const purchaseOrder of purchaseOrderRows) {
+    payableBySupplier.set(purchaseOrder.supplierId, (payableBySupplier.get(purchaseOrder.supplierId) ?? 0) + purchaseOrder.balanceDue);
+  }
+
   const inventoryRows = inventory.rows.map((row) => ({
     productId: row.product_id,
     code: row.code,
@@ -826,6 +905,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
     reorderLevelCases: row.reorder_level_cases,
     latestZone: row.latest_zone,
     latestBatch: row.latest_batch,
+    latestProductionDate: toIsoDate(row.latest_production_date),
     latestExpiryDate: row.latest_expiry_date
   }));
 
@@ -841,7 +921,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
   }));
 
   const revenue = salesOrderRows.reduce((sum, item) => sum + item.amount, 0);
-  const payable = purchaseOrderRows.reduce((sum, item) => sum + item.cost, 0);
+  const payable = purchaseOrderRows.reduce((sum, item) => sum + item.balanceDue, 0);
   const receivable = salesOrderRows.reduce((sum, row) => sum + row.balanceDue, 0);
   const lowStock = inventoryRows.filter((item) => item.onHandCases <= item.reorderLevelCases).length;
 
@@ -879,7 +959,7 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
       city: row.city,
       email: row.email,
       phone: row.phone,
-      receivable: Number(row.receivable)
+      receivable: receivableByCustomer.get(row.id) ?? 0
     })),
     suppliers: suppliers.rows.map((row) => ({
       id: row.id,
@@ -889,10 +969,12 @@ export async function getDashboardData(currentUser: SessionUser | null): Promise
       leadTimeDays: row.lead_time_days,
       status: row.status,
       email: row.email,
-      phone: row.phone
+      phone: row.phone,
+      payable: payableBySupplier.get(row.id) ?? 0
     })),
     salesOrders: salesOrderRows,
     customerPayments: paymentRows,
+    supplierPayments: supplierPaymentRows,
     purchaseOrders: purchaseOrderRows,
     productionTransactions: productionRows,
     stockMovements: stockRows,
@@ -933,6 +1015,9 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
     supplierId: index + 1,
     rawMaterialId: seedRawMaterials.findIndex((material) => material.name === row.material) + 1 || null,
     ...row,
+    amountPaid: 0,
+    balanceDue: row.cost,
+    paymentStatus: "Due" as const,
     createdAt: new Date().toISOString()
   }));
 
@@ -953,6 +1038,7 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
     reorderLevelCases: product.reorderLevelCases,
     latestZone: seedStockMovements[index]?.zone ?? "",
     latestBatch: seedStockMovements[index]?.batchCode ?? "",
+    latestProductionDate: new Date().toISOString().slice(0, 10),
     latestExpiryDate: seedStockMovements[index]?.expiryDate ?? ""
   }));
 
@@ -975,9 +1061,14 @@ function getDemoDashboardData(currentUser: SessionUser | null): DashboardData {
       totalPurchasedQty: seedPurchaseOrders.filter((po) => po.material === row.name).reduce((sum, po) => sum + po.quantityCases, 0)
     })),
     customers: seedCustomers.map((row, index) => ({ id: index + 1, ...row })),
-    suppliers: seedSuppliers.map((row, index) => ({ id: index + 1, ...row })),
+    suppliers: seedSuppliers.map((row, index) => ({
+      id: index + 1,
+      ...row,
+      payable: purchaseOrders.filter((po) => po.supplierId === index + 1).reduce((sum, po) => sum + po.balanceDue, 0)
+    })),
     salesOrders,
     customerPayments: [],
+    supplierPayments: [],
     purchaseOrders,
     productionTransactions,
     stockMovements: seedStockMovements.map((row, index) => ({
@@ -1313,11 +1404,11 @@ export async function createPurchaseOrder(input: { supplierId: number; rawMateri
   const poNo = await getNextDocumentNumber(pool, "purchase_order", "PO-");
   const rawMaterial = await pool.query("SELECT name FROM raw_materials WHERE id = $1", [input.rawMaterialId]);
   await pool.query(
-    `INSERT INTO purchase_orders (po_no, supplier_id, raw_material_id, material, status, expected_date, quantity_cases, cost, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    `INSERT INTO purchase_orders (po_no, supplier_id, raw_material_id, material, status, expected_date, quantity_cases, cost, amount_paid, payment_status, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 'Due', $9)`,
     [poNo, input.supplierId, input.rawMaterialId, rawMaterial.rows[0]?.name ?? "", input.status, input.expectedDate, input.quantityCases, input.cost, input.userId]
   );
-  await recordAudit(pool, input.userId, "create", "purchase-order", poNo, "Created raw material purchase order.");
+  await recordAudit(pool, input.userId, "create", "purchase-order", poNo, "Created raw material purchase order with payable due.");
 }
 
 export async function updatePurchaseOrder(input: { id: number; poNo: string; supplierId: number; rawMaterialId: number; status: string; expectedDate: string; quantityCases: number; cost: number; userId: number | null }) {
@@ -1331,6 +1422,16 @@ export async function updatePurchaseOrder(input: { id: number; poNo: string; sup
      WHERE id = $1`,
     [input.id, input.poNo, input.supplierId, input.rawMaterialId, rawMaterial.rows[0]?.name ?? "", input.status, input.expectedDate, input.quantityCases, input.cost]
   );
+  await pool.query(
+    `UPDATE purchase_orders
+     SET payment_status = CASE
+       WHEN amount_paid >= cost THEN 'Paid'
+       WHEN amount_paid > 0 THEN 'Partially Paid'
+       ELSE 'Due'
+     END
+     WHERE id = $1`,
+    [input.id]
+  );
   await recordAudit(pool, input.userId, "update", "purchase-order", input.poNo, "Updated raw material purchase order.");
 }
 
@@ -1339,6 +1440,7 @@ export async function deletePurchaseOrder(id: number, userId: number | null) {
   await ensureDatabase();
   const pool = getPool();
   const label = await pool.query("SELECT po_no FROM purchase_orders WHERE id = $1", [id]);
+  await pool.query("DELETE FROM supplier_payments WHERE purchase_order_id = $1", [id]);
   await pool.query("DELETE FROM purchase_orders WHERE id = $1", [id]);
   await recordAudit(pool, userId, "delete", "purchase-order", label.rows[0]?.po_no ?? `PO ${id}`, "Deleted purchase order.");
 }
@@ -1422,7 +1524,7 @@ export async function clearOperationalData(userId: number | null) {
   await ensureDatabase();
   const pool = getPool();
 
-  await pool.query("TRUNCATE TABLE stock_movements, production_transactions, purchase_orders, sales_order_items, sales_orders, raw_materials, suppliers, customers, products, audit_logs RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE TABLE stock_movements, production_transactions, supplier_payments, purchase_orders, customer_payments, sales_order_items, sales_orders, raw_materials, suppliers, customers, products, audit_logs RESTART IDENTITY CASCADE");
   await pool.query("DELETE FROM document_counters");
   await initializeCounters(pool);
   await recordAudit(pool, userId, "reset", "system", "Operational Data Cleared", "Cleared products, raw materials, suppliers, customers, orders, purchasing, production, inventory, and audit history while preserving users and ERP settings.");
@@ -1432,7 +1534,7 @@ export async function exportBackupData() {
   assertDatabaseConfigured();
   await ensureDatabase();
   const pool = getPool();
-  const [users, products, rawMaterials, customers, suppliers, salesOrders, salesOrderItems, purchaseOrders, productionTransactions, stockMovements, customerPayments, auditLogs, counters, settings] =
+  const [users, products, rawMaterials, customers, suppliers, salesOrders, salesOrderItems, purchaseOrders, productionTransactions, stockMovements, customerPayments, supplierPayments, auditLogs, counters, settings] =
     await Promise.all([
       pool.query("SELECT id, username, display_name, role, created_at FROM users ORDER BY id"),
       pool.query("SELECT * FROM products ORDER BY id"),
@@ -1445,6 +1547,7 @@ export async function exportBackupData() {
       pool.query("SELECT * FROM production_transactions ORDER BY id"),
       pool.query("SELECT * FROM stock_movements ORDER BY id"),
       pool.query("SELECT * FROM customer_payments ORDER BY id"),
+      pool.query("SELECT * FROM supplier_payments ORDER BY id"),
       pool.query("SELECT * FROM audit_logs ORDER BY id"),
       pool.query("SELECT * FROM document_counters ORDER BY counter_name"),
       pool.query("SELECT * FROM system_settings ORDER BY id")
@@ -1465,6 +1568,7 @@ export async function exportBackupData() {
       productionTransactions: productionTransactions.rows,
       stockMovements: stockMovements.rows,
       customerPayments: customerPayments.rows,
+      supplierPayments: supplierPayments.rows,
       auditLogs: auditLogs.rows,
       documentCounters: counters.rows,
       systemSettings: settings.rows

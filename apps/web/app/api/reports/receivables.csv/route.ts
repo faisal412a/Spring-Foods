@@ -7,22 +7,20 @@ export async function GET(request: Request) {
   if (!user) {
     return new Response("Unauthorized", { status: 401 });
   }
+
   const data = await getDashboardData(user);
   const { from, to } = readDateRange(request.url);
   const rows = data.salesOrders
-    .filter((order) => isWithinDateRange(order.deliveryDate, from, to))
+    .filter((order) => isWithinDateRange(order.createdAt, from, to))
     .map((order) => [
-      order.orderNo,
       order.invoiceNo,
       order.customer,
-      order.city,
-      order.productName,
-      order.quantityCases,
-      order.unitPrice,
+      order.createdAt.slice(0, 10),
       order.amount,
-      order.status,
-      order.deliveryDate
+      order.amountPaid,
+      order.balanceDue,
+      order.paymentStatus
     ]);
 
-  return csvDownloadResponse("sales-report.csv", ["Order No", "Invoice No", "Customer", "City", "Product", "Quantity Cases", "Unit Price", "Amount", "Status", "Delivery Date"], rows);
+  return csvDownloadResponse("receivables-report.csv", ["Invoice No", "Customer", "Invoice Date", "Invoice Amount", "Paid", "Balance Due", "Payment Status"], rows);
 }
