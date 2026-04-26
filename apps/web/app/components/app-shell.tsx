@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ReactNode } from "react";
 import { logoutAction } from "../actions";
+import { SessionActivityGuard } from "./session-activity-guard";
 import { SessionUser, SystemSettings, roleLabels } from "../../lib/erp-data";
 import { getNavItems } from "../../lib/navigation";
 
@@ -17,6 +18,7 @@ export function AppShell({ user, settings, title, kicker, children }: AppShellPr
 
   return (
     <main className="dashboard-shell">
+      <SessionActivityGuard />
       <aside className="side-nav">
         <div className="brand-panel">
           {settings.logoUrl ? (
